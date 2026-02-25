@@ -60,7 +60,7 @@ class DemoWorker(Worker):
 
 def main() -> None:
     protocol = Protocol()
-    network_enabled = os.getenv("SWARM_NETWORK", "").lower() in {"1", "true", "yes"}
+    network_enabled = os.getenv("SWARM_NETWORK", "1").lower() in {"1", "true", "yes"}
     node_id = os.getenv("SWARM_NODE_ID", "worker-a")
     domain = os.getenv("SWARM_DOMAIN", "general")
     collections = [item.strip() for item in os.getenv("SWARM_COLLECTIONS", domain).split(",") if item.strip()]
