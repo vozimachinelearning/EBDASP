@@ -10,7 +10,7 @@ call "%VENV_DIR%\Scripts\activate.bat"
 if errorlevel 1 goto :error
 python -m pip install -U pip
 if errorlevel 1 goto :error
-python -m pip install -U reticulum rns "huggingface_hub[cli]"
+python -m pip install -U -r "%SWARM_ROOT%requirements.txt"
 if errorlevel 1 goto :error
 set "RNS_CONFIG_DIR=%SWARM_ROOT%"
 set "HF_HOME=%SWARM_ROOT%hf"

@@ -7,6 +7,7 @@ from .messages import (
     QueryResponse,
     RouteRequest,
     RouteResponse,
+    TextMessage,
 )
 from .orchestrator import Orchestrator
 from .protocol import Protocol
@@ -31,4 +32,5 @@ __all__ = [
     "Heartbeat",
     "RouteRequest",
     "RouteResponse",
+    "TextMessage",
 ]

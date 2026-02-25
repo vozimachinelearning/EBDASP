@@ -118,6 +118,20 @@ class RouteResponse(Message):
         return data
 
 
+@dataclass
+class TextMessage(Message):
+    message_id: str
+    sender: str
+    recipient: str
+    text: str
+    timestamp: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "text_message"
+        return data
+
+
 def message_from_dict(data: Dict[str, Any]) -> Message:
     message_type = data.get("type")
     if message_type == "query_request":
@@ -179,5 +193,13 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
         return RouteResponse(
             query_id=data["query_id"],
             node_ids=list(data.get("node_ids", [])),
+        )
+    if message_type == "text_message":
+        return TextMessage(
+            message_id=data["message_id"],
+            sender=data["sender"],
+            recipient=data["recipient"],
+            text=data.get("text", ""),
+            timestamp=data.get("timestamp", ""),
         )
     raise ValueError(f"Unknown message type: {message_type}")

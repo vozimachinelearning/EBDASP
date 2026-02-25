@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 import threading
+import uuid
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import RNS
 
-from .messages import AnnounceCapabilities, Heartbeat, QueryRequest, QueryResponse, RouteRequest, RouteResponse
+from .messages import (
+    AnnounceCapabilities,
+    Heartbeat,
+    QueryRequest,
+    QueryResponse,
+    RouteRequest,
+    RouteResponse,
+    TextMessage,
+)
 from .protocol import Protocol
 class Transport:
     def __init__(
@@ -132,6 +141,38 @@ class Transport:
         )
         return response
 
+    def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
+        message = TextMessage(
+            message_id=str(uuid.uuid4()),
+            sender=sender or self.node_id,
+            recipient=node_id,
+            text=text,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
+        )
+        self.emit_activity(
+            "message_sent",
+            node_id=node_id,
+            payload={
+                "message_id": message.message_id,
+                "sender": message.sender,
+                "recipient": message.recipient,
+                "text": message.text,
+            },
+        )
+        if node_id in self._workers:
+            self.emit_activity(
+                "message_received",
+                node_id=node_id,
+                payload={
+                    "message_id": message.message_id,
+                    "sender": message.sender,
+                    "recipient": message.recipient,
+                    "text": message.text,
+                },
+            )
+            return True
+        return False
+
     def _prune_stale(self) -> None:
         now = self._time_provider()
         expired: List[str] = []
@@ -252,6 +293,49 @@ class NetworkTransport(Transport):
             raise TimeoutError(f"No response for query {request.query_id}")
         return response
 
+    def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
+        if node_id in self._workers:
+            return super().send_message(node_id, text, sender=sender)
+        if node_id not in self._node_identities:
+            return False
+        message = TextMessage(
+            message_id=str(uuid.uuid4()),
+            sender=sender or self.node_id,
+            recipient=node_id,
+            text=text,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
+        )
+        payload = self.protocol.encode_binary(message)
+        if not self._send_packet(node_id, payload):
+            return False
+        self.emit_activity(
+            "message_sent",
+            node_id=node_id,
+            payload={
+                "message_id": message.message_id,
+                "sender": message.sender,
+                "recipient": message.recipient,
+                "text": message.text,
+            },
+        )
+        return True
+
+    def interface_status(self) -> List[Dict[str, Any]]:
+        interfaces = []
+        for interface in list(RNS.Transport.interfaces):
+            name = getattr(interface, "name", None) or str(interface)
+            interfaces.append(
+                {
+                    "name": name,
+                    "type": interface.__class__.__name__,
+                    "in": bool(getattr(interface, "IN", False)),
+                    "out": bool(getattr(interface, "OUT", False)),
+                    "online": bool(getattr(interface, "online", False)),
+                    "bitrate": int(getattr(interface, "bitrate", 0) or 0),
+                }
+            )
+        return interfaces
+
     def _announce_loop(self) -> None:
         while not self._stop_event.is_set():
             for announcement in list(self._announcements.values()):
@@ -307,6 +391,18 @@ class NetworkTransport(Transport):
                 self._pending_responses[message.query_id] = message
                 event.set()
             return
+        if isinstance(message, TextMessage):
+            self.emit_activity(
+                "message_received",
+                node_id=message.sender,
+                payload={
+                    "message_id": message.message_id,
+                    "sender": message.sender,
+                    "recipient": message.recipient,
+                    "text": message.text,
+                },
+            )
+            return
 
     def _ensure_path(self, node_id: str, wait_seconds: float = 2.0) -> bool:
         destination_hash = self._node_destinations.get(node_id)
@@ -314,14 +410,18 @@ class NetworkTransport(Transport):
             return False
         destination_hash_bytes = bytes.fromhex(destination_hash)
         if RNS.Transport.has_path(destination_hash_bytes):
-            return True
+            next_hop_interface = RNS.Transport.next_hop_interface(destination_hash_bytes)
+            if next_hop_interface is not None and getattr(next_hop_interface, "OUT", False):
+                return True
         RNS.Transport.request_path(destination_hash_bytes)
         if wait_seconds <= 0:
             return False
         deadline = time.monotonic() + wait_seconds
         while time.monotonic() < deadline:
             if RNS.Transport.has_path(destination_hash_bytes):
-                return True
+                next_hop_interface = RNS.Transport.next_hop_interface(destination_hash_bytes)
+                if next_hop_interface is not None and getattr(next_hop_interface, "OUT", False):
+                    return True
             time.sleep(0.1)
         return False
 
