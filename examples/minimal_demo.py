@@ -1,3 +1,5 @@
+import sys
+import threading
 import time
 import uuid
 
@@ -58,11 +60,14 @@ def main() -> None:
     transport = Transport(node_id="coordinator")
     coordinator = Coordinator(protocol, transport, VectorStore(collection_id="root"))
     orchestrator = Orchestrator(coordinator, transport)
+    prompt = "swarm> "
 
     def print_activity(event: dict) -> None:
         timestamp = time.strftime("%H:%M:%S", time.localtime(event["timestamp"]))
         node_label = event["node_id"] or "swarm"
         print(f"[{timestamp}] {node_label} {event['event']} {event['payload']}")
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
 
     transport.subscribe_activity(print_activity)
 
@@ -90,11 +95,19 @@ def main() -> None:
             signature="firma-b",
         )
     )
-    transport.heartbeat("worker-a")
-    transport.heartbeat("worker-b")
+    stop_event = threading.Event()
+
+    def heartbeat_loop() -> None:
+        while not stop_event.is_set():
+            transport.heartbeat("worker-a")
+            transport.heartbeat("worker-b")
+            time.sleep(5.0)
+
+    threading.Thread(target=heartbeat_loop, daemon=True).start()
     print("Nodo Swarm listo. Escribe una pregunta o 'exit' para salir.")
+    print(f"Nodos disponibles: {len(transport.available_nodes())}")
     while True:
-        question = input("swarm> ").strip()
+        question = input(prompt).strip()
         if not question:
             continue
         if question.lower() in {"exit", "quit"}:
@@ -102,8 +115,6 @@ def main() -> None:
         if question.lower() == "status":
             print(transport.live_status())
             continue
-        transport.heartbeat("worker-a")
-        transport.heartbeat("worker-b")
         responses = orchestrator.distribute(
             question=question,
             domain=None,
@@ -112,6 +123,7 @@ def main() -> None:
         )
         for response in responses:
             print(response.query_id, response.claims, response.confidence)
+    stop_event.set()
 
 
 if __name__ == "__main__":
