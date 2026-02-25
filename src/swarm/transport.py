@@ -255,9 +255,9 @@ class NetworkTransport(Transport):
                     self.announce(announcement)
             time.sleep(self._announce_interval_seconds)
 
-    def _on_packet(self, packet: RNS.Packet) -> None:
+    def _on_packet(self, payload: bytes, packet: RNS.Packet) -> None:
         try:
-            message = self.protocol.decode_compact(packet.data)
+            message = self.protocol.decode_compact(payload)
         except Exception:
             return
         if isinstance(message, AnnounceCapabilities):
