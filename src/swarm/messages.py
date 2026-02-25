@@ -75,6 +75,7 @@ class AnnounceCapabilities(Message):
     collections: List[str]
     timestamp: str
     signature: str
+    destination_hash: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -160,6 +161,7 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             collections=list(data.get("collections", [])),
             timestamp=data["timestamp"],
             signature=data["signature"],
+            destination_hash=data.get("destination_hash"),
         )
     if message_type == "heartbeat":
         return Heartbeat(

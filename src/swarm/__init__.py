@@ -10,7 +10,7 @@ from .messages import (
 )
 from .orchestrator import Orchestrator
 from .protocol import Protocol
-from .transport import Transport
+from .transport import NetworkTransport, Transport
 from .vector_store import VectorStore
 from .coordinator import Coordinator
 from .worker import Worker
@@ -21,6 +21,7 @@ __all__ = [
     "Protocol",
     "VectorStore",
     "Transport",
+    "NetworkTransport",
     "Orchestrator",
     "QueryRequest",
     "QueryResponse",
