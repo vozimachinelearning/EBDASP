@@ -210,7 +210,7 @@ class NetworkTransport(Transport):
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
             status="ok",
         )
-        payload = self.protocol.encode_compact(heartbeat)
+        payload = self.protocol.encode_binary(heartbeat)
         for remote_node_id in list(self._node_identities.keys()):
             self._send_packet(remote_node_id, payload)
 
@@ -231,7 +231,7 @@ class NetworkTransport(Transport):
             recursion_budget=request.recursion_budget,
             constraints=constraints,
         )
-        payload = self.protocol.encode_compact(network_request)
+        payload = self.protocol.encode_binary(network_request)
         event = threading.Event()
         with self._pending_lock:
             self._pending_events[request.query_id] = event
@@ -257,9 +257,12 @@ class NetworkTransport(Transport):
 
     def _on_packet(self, payload: bytes, packet: RNS.Packet) -> None:
         try:
-            message = self.protocol.decode_compact(payload)
+            message = self.protocol.decode_binary(payload)
         except Exception:
-            return
+            try:
+                message = self.protocol.decode_compact(payload)
+            except Exception:
+                return
         if isinstance(message, AnnounceCapabilities):
             if not message.destination_hash:
                 message.destination_hash = packet.destination_hash.hex()
@@ -285,7 +288,7 @@ class NetworkTransport(Transport):
             reply_to = message.constraints.get("reply_to")
             reply_to_node_id = message.constraints.get("reply_to_node_id")
             if reply_to_node_id or reply_to:
-                payload = self.protocol.encode_compact(response)
+                payload = self.protocol.encode_binary(response)
                 if reply_to_node_id and reply_to_node_id in self._node_identities:
                     self._send_packet(reply_to_node_id, payload)
                 elif reply_to and reply_to in self._destination_to_node:
