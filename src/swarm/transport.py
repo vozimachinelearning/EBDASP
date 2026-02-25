@@ -235,7 +235,11 @@ class NetworkTransport(Transport):
         event = threading.Event()
         with self._pending_lock:
             self._pending_events[request.query_id] = event
-        self._send_packet(node_id, payload)
+        if not self._send_packet(node_id, payload):
+            with self._pending_lock:
+                self._pending_events.pop(request.query_id, None)
+                self._pending_responses.pop(request.query_id, None)
+            raise TimeoutError(f"No path to remote node {node_id}")
         if not event.wait(self._response_timeout_seconds):
             with self._pending_lock:
                 self._pending_events.pop(request.query_id, None)
@@ -269,6 +273,7 @@ class NetworkTransport(Transport):
             if message.destination_hash:
                 self._node_destinations[message.node_id] = message.destination_hash
                 self._destination_to_node[message.destination_hash] = message.node_id
+                self._ensure_path(message.node_id, wait_seconds=0)
             super().announce(message)
             return
         if isinstance(message, Heartbeat):
@@ -303,10 +308,29 @@ class NetworkTransport(Transport):
                 event.set()
             return
 
-    def _send_packet(self, node_id: str, payload: bytes) -> None:
+    def _ensure_path(self, node_id: str, wait_seconds: float = 2.0) -> bool:
+        destination_hash = self._node_destinations.get(node_id)
+        if not destination_hash:
+            return False
+        destination_hash_bytes = bytes.fromhex(destination_hash)
+        if RNS.Transport.has_path(destination_hash_bytes):
+            return True
+        RNS.Transport.request_path(destination_hash_bytes)
+        if wait_seconds <= 0:
+            return False
+        deadline = time.monotonic() + wait_seconds
+        while time.monotonic() < deadline:
+            if RNS.Transport.has_path(destination_hash_bytes):
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _send_packet(self, node_id: str, payload: bytes) -> bool:
         identity = self._node_identities.get(node_id)
         if identity is None:
-            return
+            return False
+        if not self._ensure_path(node_id):
+            return False
         destination = RNS.Destination(
             identity,
             RNS.Destination.OUT,
@@ -316,6 +340,7 @@ class NetworkTransport(Transport):
         )
         packet = RNS.Packet(destination, payload)
         packet.send()
+        return True
 
 
 class _AnnounceHandler:
