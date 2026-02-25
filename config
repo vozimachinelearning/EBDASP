@@ -76,7 +76,7 @@
   # al mismo WiFi). No requiere configuración adicional.
   [[Default Local Interface]]
     type = AutoInterface
-    enabled = Yes
+    enabled = No
     # Puedes cambiar este ID para crear una red local privada
     group_id = public
 
@@ -159,5 +159,7 @@
     enabled = Yes
     target_host = rns.beleth.net
     target_port = 4242
+
+
 
 
