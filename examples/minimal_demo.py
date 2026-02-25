@@ -143,6 +143,8 @@ class SwarmTUI(App):
         self.call_from_thread(self._append_activity, event)
 
     def _append_activity(self, event: dict) -> None:
+        if event.get("event") != "message_received":
+            return
         timestamp = time.strftime("%H:%M:%S", time.localtime(event["timestamp"]))
         node_label = event["node_id"] or "swarm"
         self.activity_log.write(f"[{timestamp}] {node_label} {event['event']} {event['payload']}")
