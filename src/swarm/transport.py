@@ -163,6 +163,8 @@ class NetworkTransport(Transport):
         self._response_timeout_seconds = response_timeout_seconds
         self._announce_interval_seconds = announce_interval_seconds
         self._node_destinations: Dict[str, str] = {}
+        self._node_identities: Dict[str, Any] = {}
+        self._destination_to_node: Dict[str, str] = {}
         self._pending_responses: Dict[str, QueryResponse] = {}
         self._pending_events: Dict[str, threading.Event] = {}
         self._pending_lock = threading.Lock()
@@ -209,19 +211,19 @@ class NetworkTransport(Transport):
             status="ok",
         )
         payload = self.protocol.encode_compact(heartbeat)
-        for destination_hash in list(self._node_destinations.values()):
-            self._send_packet(destination_hash, payload)
+        for remote_node_id in list(self._node_identities.keys()):
+            self._send_packet(remote_node_id, payload)
 
     def send_query(self, node_id: str, request: QueryRequest) -> QueryResponse:
         worker = self._workers.get(node_id)
         if worker is not None:
             return super().send_query(node_id, request)
-        destination_hash = self._node_destinations.get(node_id)
-        if destination_hash is None:
+        if node_id not in self._node_identities:
             raise ValueError(f"Unknown remote node: {node_id}")
         constraints = dict(request.constraints)
         constraints["target_node_id"] = node_id
         constraints["reply_to"] = self._destination_hash_hex
+        constraints["reply_to_node_id"] = self.node_id
         network_request = QueryRequest(
             query_id=request.query_id,
             question=request.question,
@@ -233,7 +235,7 @@ class NetworkTransport(Transport):
         event = threading.Event()
         with self._pending_lock:
             self._pending_events[request.query_id] = event
-        self._send_packet(destination_hash, payload)
+        self._send_packet(node_id, payload)
         if not event.wait(self._response_timeout_seconds):
             with self._pending_lock:
                 self._pending_events.pop(request.query_id, None)
@@ -263,6 +265,7 @@ class NetworkTransport(Transport):
                 message.destination_hash = packet.destination_hash.hex()
             if message.destination_hash:
                 self._node_destinations[message.node_id] = message.destination_hash
+                self._destination_to_node[message.destination_hash] = message.node_id
             super().announce(message)
             return
         if isinstance(message, Heartbeat):
@@ -280,9 +283,13 @@ class NetworkTransport(Transport):
                 return
             response = worker.handle_query(message)
             reply_to = message.constraints.get("reply_to")
-            if reply_to:
+            reply_to_node_id = message.constraints.get("reply_to_node_id")
+            if reply_to_node_id or reply_to:
                 payload = self.protocol.encode_compact(response)
-                self._send_packet(reply_to, payload)
+                if reply_to_node_id and reply_to_node_id in self._node_identities:
+                    self._send_packet(reply_to_node_id, payload)
+                elif reply_to and reply_to in self._destination_to_node:
+                    self._send_packet(self._destination_to_node[reply_to], payload)
             return
         if isinstance(message, QueryResponse):
             with self._pending_lock:
@@ -293,14 +300,16 @@ class NetworkTransport(Transport):
                 event.set()
             return
 
-    def _send_packet(self, destination_hash: str, payload: bytes) -> None:
+    def _send_packet(self, node_id: str, payload: bytes) -> None:
+        identity = self._node_identities.get(node_id)
+        if identity is None:
+            return
         destination = RNS.Destination(
-            self._identity,
+            identity,
             RNS.Destination.OUT,
             RNS.Destination.SINGLE,
             self._app_name,
             self._aspect,
-            bytes.fromhex(destination_hash),
         )
         packet = RNS.Packet(destination, payload)
         packet.send()
@@ -323,4 +332,7 @@ class _AnnounceHandler:
                 message.destination_hash = destination_hash.hex()
             if message.destination_hash:
                 self.transport._node_destinations[message.node_id] = message.destination_hash
+                self.transport._destination_to_node[message.destination_hash] = message.node_id
+            if announced_identity is not None:
+                self.transport._node_identities[message.node_id] = announced_identity
             super(NetworkTransport, self.transport).announce(message)
