@@ -1,9 +1,8 @@
+from __future__ import annotations
+
 from typing import Dict, List, Optional
 
 from .messages import AnnounceCapabilities, QueryRequest, QueryResponse, RouteRequest, RouteResponse
-from .worker import Worker
-
-
 class Transport:
     def __init__(self, node_id: str) -> None:
         self.node_id = node_id

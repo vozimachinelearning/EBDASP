@@ -82,24 +82,21 @@ def main() -> None:
             signature="firma-b",
         )
     )
-
-    responses = orchestrator.distribute(
-        question="Resumen de contexto",
-        domain="historia",
-        recursion_budget=1,
-        max_workers=2,
-    )
-    for response in responses:
-        print(response.query_id, response.claims, response.confidence)
-
-    recursive = orchestrator.distribute_recursive(
-        question="Consulta recursiva",
-        domain="ciencia",
-        recursion_budget=2,
-        max_workers=2,
-    )
-    for response in recursive:
-        print(response.query_id, response.claims, response.confidence)
+    print("Nodo Swarm listo. Escribe una pregunta o 'exit' para salir.")
+    while True:
+        question = input("swarm> ").strip()
+        if not question:
+            continue
+        if question.lower() in {"exit", "quit"}:
+            break
+        responses = orchestrator.distribute(
+            question=question,
+            domain=None,
+            recursion_budget=1,
+            max_workers=2,
+        )
+        for response in responses:
+            print(response.query_id, response.claims, response.confidence)
 
 
 if __name__ == "__main__":

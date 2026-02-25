@@ -1,6 +1,7 @@
+from __future__ import annotations
+
 from .messages import QueryRequest, QueryResponse
 from .protocol import Protocol
-from .transport import Transport
 from .vector_store import VectorStore
 
 
