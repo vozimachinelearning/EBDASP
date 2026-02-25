@@ -137,6 +137,9 @@ class SwarmTUI(App):
         self.stop_event.set()
 
     def _on_activity(self, event: dict) -> None:
+        if threading.current_thread() is threading.main_thread():
+            self._append_activity(event)
+            return
         self.call_from_thread(self._append_activity, event)
 
     def _append_activity(self, event: dict) -> None:
