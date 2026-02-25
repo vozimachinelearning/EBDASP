@@ -10,16 +10,18 @@ call "%VENV_DIR%\Scripts\activate.bat"
 if errorlevel 1 goto :error
 python -m pip install -U pip
 if errorlevel 1 goto :error
-python -m pip install -U reticulum "huggingface_hub[cli]"
+python -m pip install -U reticulum rns "huggingface_hub[cli]"
 if errorlevel 1 goto :error
 set "RNS_CONFIG_DIR=%SWARM_ROOT%"
 set "HF_HOME=%SWARM_ROOT%hf"
 set "SWARM_MODELS=%SWARM_ROOT%models"
 if not defined SWARM_LLM_REPO set "SWARM_LLM_REPO=Qwen/Qwen2.5-0.5B-Instruct"
 if not defined SWARM_EMBED_REPO set "SWARM_EMBED_REPO=BAAI/bge-m3"
+set "SWARM_GROUP_ID=public"
 set "SWARM_LLM_PATH=%SWARM_MODELS%\llm"
 set "SWARM_EMBED_PATH=%SWARM_MODELS%\embeddings"
 set "PYTHONPATH=%SWARM_ROOT%src;%PYTHONPATH%"
+powershell -NoProfile -Command "(Get-Content '%RNS_CONFIG_DIR%config') -replace '^\s*group_id\s*=.*$','    group_id = %SWARM_GROUP_ID%' | Set-Content '%RNS_CONFIG_DIR%config'"
 if not exist "%SWARM_MODELS%" mkdir "%SWARM_MODELS%"
 if not exist "%SWARM_LLM_PATH%" mkdir "%SWARM_LLM_PATH%"
 if not exist "%SWARM_EMBED_PATH%" mkdir "%SWARM_EMBED_PATH%"

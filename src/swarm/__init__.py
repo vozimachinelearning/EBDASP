@@ -1,6 +1,7 @@
 from .messages import (
     AnnounceCapabilities,
     EvidenceChunk,
+    Heartbeat,
     IndexHint,
     QueryRequest,
     QueryResponse,
@@ -26,6 +27,7 @@ __all__ = [
     "EvidenceChunk",
     "IndexHint",
     "AnnounceCapabilities",
+    "Heartbeat",
     "RouteRequest",
     "RouteResponse",
 ]

@@ -1,3 +1,4 @@
+import time
 import uuid
 
 from swarm import (
@@ -58,6 +59,13 @@ def main() -> None:
     coordinator = Coordinator(protocol, transport, VectorStore(collection_id="root"))
     orchestrator = Orchestrator(coordinator, transport)
 
+    def print_activity(event: dict) -> None:
+        timestamp = time.strftime("%H:%M:%S", time.localtime(event["timestamp"]))
+        node_label = event["node_id"] or "swarm"
+        print(f"[{timestamp}] {node_label} {event['event']} {event['payload']}")
+
+    transport.subscribe_activity(print_activity)
+
     worker_a = DemoWorker("worker-a", "historia", protocol, transport)
     worker_b = DemoWorker("worker-b", "ciencia", protocol, transport)
 
@@ -82,6 +90,8 @@ def main() -> None:
             signature="firma-b",
         )
     )
+    transport.heartbeat("worker-a")
+    transport.heartbeat("worker-b")
     print("Nodo Swarm listo. Escribe una pregunta o 'exit' para salir.")
     while True:
         question = input("swarm> ").strip()
@@ -89,6 +99,11 @@ def main() -> None:
             continue
         if question.lower() in {"exit", "quit"}:
             break
+        if question.lower() == "status":
+            print(transport.live_status())
+            continue
+        transport.heartbeat("worker-a")
+        transport.heartbeat("worker-b")
         responses = orchestrator.distribute(
             question=question,
             domain=None,

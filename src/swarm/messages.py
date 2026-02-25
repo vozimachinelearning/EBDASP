@@ -83,6 +83,18 @@ class AnnounceCapabilities(Message):
 
 
 @dataclass
+class Heartbeat(Message):
+    node_id: str
+    timestamp: str
+    status: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "heartbeat"
+        return data
+
+
+@dataclass
 class RouteRequest(Message):
     query_id: str
     domain: Optional[str]
@@ -148,6 +160,12 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             collections=list(data.get("collections", [])),
             timestamp=data["timestamp"],
             signature=data["signature"],
+        )
+    if message_type == "heartbeat":
+        return Heartbeat(
+            node_id=data["node_id"],
+            timestamp=data["timestamp"],
+            status=data.get("status", ""),
         )
     if message_type == "route_request":
         return RouteRequest(
