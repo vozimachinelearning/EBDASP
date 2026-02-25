@@ -146,8 +146,10 @@ class SwarmTUI(App):
         if event.get("event") != "message_received":
             return
         timestamp = time.strftime("%H:%M:%S", time.localtime(event["timestamp"]))
-        node_label = event["node_id"] or "swarm"
-        self.activity_log.write(f"[{timestamp}] {node_label} {event['event']} {event['payload']}")
+        payload = event.get("payload", {})
+        sender = payload.get("sender") or event.get("node_id") or "swarm"
+        text = payload.get("text", "")
+        self.activity_log.write(f"[{timestamp}] {sender}: {text}")
 
     def refresh_status(self) -> None:
         self.interfaces_table.clear()
