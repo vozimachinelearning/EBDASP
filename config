@@ -144,7 +144,7 @@
 
   [[RNS Transport US East]]
     type = TCPClientInterface
-    enabled = No
+    enabled = Yes
     target_host = 45.77.109.86
     target_port = 4965
 
@@ -156,9 +156,18 @@
 
   [[Beleth RNS Hub]]
     type = TCPClientInterface
-    enabled = No
+    enabled = Yes
     target_host = rns.beleth.net
     target_port = 4242
+
+
+
+
+
+
+
+
+
 
 
 

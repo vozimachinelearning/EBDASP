@@ -295,7 +295,7 @@ class NetworkTransport(Transport):
 
     def _send_packet(self, destination_hash: str, payload: bytes) -> None:
         destination = RNS.Destination(
-            None,
+            self._identity,
             RNS.Destination.OUT,
             RNS.Destination.SINGLE,
             self._app_name,
@@ -309,6 +309,7 @@ class NetworkTransport(Transport):
 class _AnnounceHandler:
     def __init__(self, transport: NetworkTransport) -> None:
         self.transport = transport
+        self.aspect_filter = f"{transport._app_name}.{transport._aspect}"
 
     def received_announce(self, destination_hash: bytes, announced_identity: Any, app_data: Optional[bytes]) -> None:
         if not app_data:
