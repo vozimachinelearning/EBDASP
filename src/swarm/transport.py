@@ -15,6 +15,8 @@ from .messages import (
     RouteRequest,
     RouteResponse,
     TextMessage,
+    TaskAssignment,
+    TaskResult,
 )
 from .protocol import Protocol
 class Transport:
@@ -140,6 +142,12 @@ class Transport:
             },
         )
         return response
+
+    def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
+        worker = self._workers.get(node_id)
+        if worker is not None:
+            return worker.handle_task(assignment)
+        raise NotImplementedError("Remote task sending not implemented in base Transport")
 
     def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
         message = TextMessage(
@@ -293,6 +301,48 @@ class NetworkTransport(Transport):
             raise TimeoutError(f"No response for query {request.query_id}")
         return response
 
+    def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
+        worker = self._workers.get(node_id)
+        if worker is not None:
+            return super().send_task(node_id, assignment)
+        
+        if node_id not in self._node_identities:
+            raise ValueError(f"Unknown remote node: {node_id}")
+            
+        # Update assignment with sender info if missing
+        if not assignment.sender_node_id:
+            assignment.sender_node_id = self.node_id
+        if not assignment.sender_hash:
+            assignment.sender_hash = self._destination_hash_hex
+            
+        payload = self.protocol.encode_binary(assignment)
+        event = threading.Event()
+        with self._pending_lock:
+            self._pending_events[assignment.assignment_id] = event
+            
+        if not self._send_packet(node_id, payload):
+            with self._pending_lock:
+                self._pending_events.pop(assignment.assignment_id, None)
+            raise TimeoutError(f"No path to remote node {node_id}")
+            
+        if not event.wait(self._response_timeout_seconds):
+            with self._pending_lock:
+                self._pending_events.pop(assignment.assignment_id, None)
+                self._pending_responses.pop(assignment.assignment_id, None)
+            raise TimeoutError(f"No response for task {assignment.assignment_id}")
+            
+        with self._pending_lock:
+            response = self._pending_responses.pop(assignment.assignment_id, None)
+            self._pending_events.pop(assignment.assignment_id, None)
+            
+        if response is None:
+             raise TimeoutError(f"No response for task {assignment.assignment_id}")
+             
+        if not isinstance(response, TaskResult):
+            raise TypeError(f"Expected TaskResult, got {type(response)}")
+            
+        return response
+
     def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
         if node_id in self._workers:
             return super().send_message(node_id, text, sender=sender)
@@ -383,6 +433,44 @@ class NetworkTransport(Transport):
                 elif reply_to and reply_to in self._destination_to_node:
                     self._send_packet(self._destination_to_node[reply_to], payload)
             return
+        if isinstance(message, TaskAssignment):
+            worker = None
+            target = message.assigned_to_node
+            if target in self._workers:
+                worker = self._workers[target]
+            elif self._workers:
+                worker = next(iter(self._workers.values()))
+            
+            if worker:
+                result = worker.handle_task(message)
+                # Send result back
+                payload = self.protocol.encode_binary(result)
+                
+                # Determine destination
+                if message.sender_hash:
+                    # We can send to hash if we have a mapping or use raw RNS if possible.
+                    # self._send_packet uses node_id.
+                    # If we have sender_node_id and it's in identities, great.
+                    if message.sender_node_id and message.sender_node_id in self._node_identities:
+                        self._send_packet(message.sender_node_id, payload)
+                    elif message.sender_hash in self._destination_to_node:
+                        node_id = self._destination_to_node[message.sender_hash]
+                        self._send_packet(node_id, payload)
+                    else:
+                        # We have the hash but no node_id mapping.
+                        # _send_packet requires node_id to lookup identity.
+                        # This is a limitation of current implementation.
+                        # We'll log error or try best effort.
+                        pass
+            return
+
+        if isinstance(message, TaskResult):
+            with self._pending_lock:
+                if message.assignment_id in self._pending_events:
+                    self._pending_responses[message.assignment_id] = message
+                    self._pending_events[message.assignment_id].set()
+            return
+
         if isinstance(message, QueryResponse):
             with self._pending_lock:
                 event = self._pending_events.get(message.query_id)

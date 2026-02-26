@@ -132,6 +132,82 @@ class TextMessage(Message):
         return data
 
 
+@dataclass
+class Task(Message):
+    task_id: str
+    description: str
+    role: str
+    status: str = "pending"
+    parent_task_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "task"
+        return data
+
+
+@dataclass
+class TaskAssignment(Message):
+    assignment_id: str
+    task: Task
+    assigned_to_node: str
+    timestamp: str
+    sender_node_id: Optional[str] = None
+    sender_hash: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "type": "task_assignment",
+            "assignment_id": self.assignment_id,
+            "task": self.task.to_dict(),
+            "assigned_to_node": self.assigned_to_node,
+            "timestamp": self.timestamp,
+            "sender_node_id": self.sender_node_id,
+            "sender_hash": self.sender_hash,
+        }
+
+
+@dataclass
+class TaskResult(Message):
+    task_id: str
+    assignment_id: str
+    result: str
+    node_id: str
+    timestamp: str
+    confidence: float = 1.0
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "task_result"
+        return data
+
+
+
+@dataclass
+class RoleAnnouncement(Message):
+    node_id: str
+    roles: List[str]
+    timestamp: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "role_announcement"
+        return data
+
+
+@dataclass
+class ContextUpdate(Message):
+    context_id: str
+    content: str
+    source_node: str
+    timestamp: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "context_update"
+        return data
+
+
 def message_from_dict(data: Dict[str, Any]) -> Message:
     message_type = data.get("type")
     if message_type == "query_request":
@@ -202,4 +278,45 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             text=data.get("text", ""),
             timestamp=data.get("timestamp", ""),
         )
+    if message_type == "task":
+        return Task(
+            task_id=data["task_id"],
+            description=data["description"],
+            role=data["role"],
+            status=data.get("status", "pending"),
+            parent_task_id=data.get("parent_task_id"),
+        )
+    if message_type == "task_assignment":
+        return TaskAssignment(
+            assignment_id=data["assignment_id"],
+            task=message_from_dict(data["task"]),
+            assigned_to_node=data["assigned_to_node"],
+            timestamp=data["timestamp"],
+            sender_node_id=data.get("sender_node_id"),
+            sender_hash=data.get("sender_hash"),
+        )
+    if message_type == "task_result":
+        return TaskResult(
+            task_id=data["task_id"],
+            assignment_id=data.get("assignment_id", ""),
+            result=data["result"],
+            node_id=data["node_id"],
+            timestamp=data["timestamp"],
+            confidence=float(data.get("confidence", 1.0)),
+        )
+
+    if message_type == "role_announcement":
+        return RoleAnnouncement(
+            node_id=data["node_id"],
+            roles=list(data.get("roles", [])),
+            timestamp=data["timestamp"],
+        )
+    if message_type == "context_update":
+        return ContextUpdate(
+            context_id=data["context_id"],
+            content=data["content"],
+            source_node=data["source_node"],
+            timestamp=data["timestamp"],
+        )
+
     raise ValueError(f"Unknown message type: {message_type}")

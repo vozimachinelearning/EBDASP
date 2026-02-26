@@ -3,3 +3,6 @@ rns
 huggingface_hub[cli]
 textual
 kivy
+torch
+transformers
+accelerate
