@@ -128,6 +128,7 @@ class Orchestrator:
                     threads.append(t)
                     t.start()
                     
+                print(f"[Orchestrator] Waiting for {len(tasks)} tasks to complete...")
                 for t in threads:
                     t.join()
             else:
@@ -137,6 +138,7 @@ class Orchestrator:
             all_results.extend(cycle_results)
             
             # 5. Consolidate & Check for Next Cycle
+            print(f"[Orchestrator] All tasks completed. Synthesizing results from {len(cycle_results)} tasks...")
             cycle_summary = "\n".join([f"Task: {r.task_id} | Result: {r.result}" for r in cycle_results])
             
             consolidation_prompt = f"""
@@ -157,6 +159,7 @@ Content: [Final Answer or Next Steps]
             response = self.llm_engine.generate(consolidation_prompt)
             
             status_line = next((line for line in response.split('\n') if line.startswith("Status:")), "Status: DONE")
+            print(f"[Orchestrator] Cycle {cycle + 1} Analysis: {status_line}")
             content_start = response.find("Content:")
             content = response[content_start + 8:].strip() if content_start != -1 else response
 

@@ -39,6 +39,8 @@ class Transport:
         self._workers[node_id] = worker
 
     def announce(self, announcement: AnnounceCapabilities) -> None:
+        if announcement.node_id not in self._announcements:
+            print(f"[Transport] Node discovered: {announcement.node_id}")
         self._announcements[announcement.node_id] = announcement
         self._last_seen[announcement.node_id] = self._time_provider()
         self.emit_activity(
@@ -189,6 +191,7 @@ class Transport:
             if now - last_seen > self.heartbeat_ttl_seconds:
                 expired.append(node_id)
         for node_id in expired:
+            print(f"[Transport] Node lost (stale): {node_id}")
             self._last_seen.pop(node_id, None)
             self._announcements.pop(node_id, None)
 
