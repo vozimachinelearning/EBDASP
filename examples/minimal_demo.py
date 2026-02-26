@@ -26,8 +26,8 @@ from swarm import (
 
 
 class DemoWorker(Worker):
-    def __init__(self, node_id: str, domain: str, protocol: Protocol, transport: Transport, llm_engine: Optional[LLMEngine] = None) -> None:
-        super().__init__(protocol, transport, VectorStore(collection_id=domain), llm_engine=llm_engine)
+    def __init__(self, node_id: str, domain: str, protocol: Protocol, transport: Transport, llm_engine: Optional[LLMEngine] = None, embedding_model_path: Optional[str] = None) -> None:
+        super().__init__(protocol, transport, VectorStore(collection_id=domain, model_path=embedding_model_path), llm_engine=llm_engine)
         self.node_id = node_id
         self.domain = domain
 
@@ -283,8 +283,23 @@ def main() -> None:
     collections = [item.strip() for item in os.getenv("SWARM_COLLECTIONS", domain).split(",") if item.strip()]
     rns_config_dir = os.getenv("RNS_CONFIG_DIR")
 
+    # Detect and set default paths
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    models_dir = os.path.join(project_root, "models")
+    default_llm_path = os.path.join(models_dir, "llm")
+    default_embeddings_path = os.path.join(models_dir, "embeddings")
+
+    if not os.getenv("SWARM_MODEL_PATH") and os.path.exists(default_llm_path):
+        os.environ["SWARM_MODEL_PATH"] = default_llm_path
+        print(f"Automatically set SWARM_MODEL_PATH to {default_llm_path}")
+
+    if not os.getenv("SWARM_EMBEDDING_PATH") and os.path.exists(default_embeddings_path):
+        os.environ["SWARM_EMBEDDING_PATH"] = default_embeddings_path
+        print(f"Automatically set SWARM_EMBEDDING_PATH to {default_embeddings_path}")
+
     # Initialize LLM Engine
     model_path = os.getenv("SWARM_MODEL_PATH")
+    embedding_path = os.getenv("SWARM_EMBEDDING_PATH")
     llm_engine = None
     if model_path:
         print(f"Initializing LLM Engine from {model_path}...")
@@ -299,14 +314,24 @@ def main() -> None:
     if network_enabled:
         transport = NetworkTransport(node_id=node_id, protocol=protocol, rns_config_dir=rns_config_dir)
         prompt = f"swarm[{node_id}]> "
+        
+        # Interface check
+        interfaces = transport.interface_status()
+        print(f"Reticulum interfaces detected: {len(interfaces)}")
+        for iface in interfaces:
+            status = "Online" if iface['online'] else "Offline"
+            print(f" - {iface['name']} ({iface['type']}): {status}, IN={iface['in']}, OUT={iface['out']}")
+        if not any(iface['out'] for iface in interfaces):
+            print("WARNING: No outbound interfaces available! 'No interfaces could process the outbound packet' error is likely.")
+            
     else:
         transport = Transport(node_id="coordinator")
-    coordinator = Coordinator(protocol, transport, VectorStore(collection_id="root"))
+    coordinator = Coordinator(protocol, transport, VectorStore(collection_id="root", model_path=embedding_path))
     orchestrator = Orchestrator(coordinator, transport, llm_engine=llm_engine)
 
     local_nodes: List[str] = []
     if network_enabled:
-        worker = DemoWorker(node_id, domain, protocol, transport, llm_engine=llm_engine)
+        worker = DemoWorker(node_id, domain, protocol, transport, llm_engine=llm_engine, embedding_model_path=embedding_path)
         transport.register_worker(node_id, worker)
         transport.announce(
             AnnounceCapabilities(
@@ -319,8 +344,8 @@ def main() -> None:
         )
         local_nodes.append(node_id)
     else:
-        worker_a = DemoWorker("worker-a", "historia", protocol, transport, llm_engine=llm_engine)
-        worker_b = DemoWorker("worker-b", "ciencia", protocol, transport, llm_engine=llm_engine)
+        worker_a = DemoWorker("worker-a", "historia", protocol, transport, llm_engine=llm_engine, embedding_model_path=embedding_path)
+        worker_b = DemoWorker("worker-b", "ciencia", protocol, transport, llm_engine=llm_engine, embedding_model_path=embedding_path)
 
         transport.register_worker("worker-a", worker_a)
         transport.register_worker("worker-b", worker_b)
