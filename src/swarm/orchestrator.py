@@ -74,10 +74,19 @@ class Orchestrator:
             
             # 4. Distribute to Workers
             available_nodes = self.transport.available_nodes()
-            if not available_nodes:
-                 print("Warning: No remote workers found. Running locally if possible (not implemented).")
-                 # In a real scenario, we might fallback to local execution or wait.
             
+            # Ensure local workers are included if not already
+            local_workers = list(self.transport._workers.keys())
+            for worker_id in local_workers:
+                if worker_id not in available_nodes:
+                    available_nodes.append(worker_id)
+            
+            if not available_nodes:
+                 print("Critical: No workers (local or remote) available to process tasks.")
+                 break
+            
+            print(f"Distributing tasks to {len(available_nodes)} nodes: {available_nodes}")
+
             cycle_results: List[TaskResult] = []
             threads = []
             results_lock = threading.Lock()
@@ -94,7 +103,7 @@ class Orchestrator:
                     result = self.transport.send_task(node_id, assignment_msg)
                     with results_lock:
                         cycle_results.append(result)
-                    print(f"Received result for task {assignment_msg.task.task_id} from {node_id}")
+                    print(f"Received result from {node_id}: {result.result[:100]}...")
                 except Exception as e:
                     print(f"Error executing task on {node_id}: {e}")
 
@@ -102,6 +111,10 @@ class Orchestrator:
                 for i, task in enumerate(tasks):
                     node_id = available_nodes[i % len(available_nodes)]
                     
+                    is_local = node_id in self.transport._workers
+                    location = "LOCAL" if is_local else "REMOTE"
+                    print(f"Dispatching task '{task.description[:30]}...' to {node_id} ({location})")
+
                     assignment_msg = TaskAssignment(
                         assignment_id=str(uuid.uuid4()),
                         task=task,
@@ -118,8 +131,9 @@ class Orchestrator:
                 for t in threads:
                     t.join()
             else:
-                 print("No workers available to dispatch.")
-
+                 print("No available workers to distribute tasks to.")
+                 break
+            
             all_results.extend(cycle_results)
             
             # 5. Consolidate & Check for Next Cycle
@@ -148,7 +162,7 @@ Content: [Final Answer or Next Steps]
 
             if "DONE" in status_line:
                 final_answer = content
-                print("Task completed.")
+                print(f"Task completed. Final Answer: {final_answer[:200]}...")
                 break
             else:
                 current_context = content

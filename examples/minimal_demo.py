@@ -147,7 +147,7 @@ class SwarmTUI(App):
                 yield RichLog(id="activity")
                 yield Static("System Logs", id="console_label")
                 yield RichLog(id="console_log", highlight=True, markup=True)
-        yield Input(placeholder="node_id: message | /broadcast message | /exit", id="input")
+        yield Input(placeholder="Ask the Swarm anything... (Decomposition -> Retrieval -> Generation)", id="input")
         yield Footer()
 
     def on_mount(self) -> None:
@@ -231,47 +231,39 @@ class SwarmTUI(App):
         if text.lower() == "/status":
             self.refresh_status()
             return
-        targets, message_text = self._parse_targets(text)
-        if not message_text:
-            return
-        if not targets:
-            self._append_activity(
-                {
-                    "timestamp": time.time(),
-                    "event": "message_failed",
-                    "node_id": "swarm",
-                    "payload": {"reason": "no_targets", "text": message_text},
-                }
-            )
-            return
-        for node_id in targets:
-            ok = self.transport.send_message(node_id, message_text, sender=self.node_id)
-            if not ok:
-                self._append_activity(
-                    {
-                        "timestamp": time.time(),
-                        "event": "message_failed",
-                        "node_id": node_id,
-                        "payload": {"reason": "send_failed", "text": message_text},
-                    }
-                )
+
+        # Unified ComoRAG Pipeline
+        # Treat every input as a task/query for the swarm
+        threading.Thread(target=self._run_swarm_pipeline, args=(text,), daemon=True).start()
+
+    def _run_swarm_pipeline(self, user_input: str) -> None:
+        """
+        Executes the unified ComoRAG pipeline:
+        1. Decompose the user input into sub-tasks (chunks).
+        2. Distribute tasks to available nodes (local + remote).
+        3. Consolidate results into a final response.
+        """
+        self.activity_log.write(f"[Me]: {user_input}")
+        print(f"Starting swarm pipeline for: {user_input}")
+        
+        try:
+            # Use the orchestrator to manage the full cycle
+            # This handles decomposition, distribution, and consolidation
+            results = self.orchestrator.decompose_and_distribute(user_input)
+            
+            final_answer = results.get('final_answer', 'No answer generated.')
+            
+            # Display the result in the activity log (chat view)
+            self.activity_log.write(f"[Swarm]: {final_answer}")
+            print(f"Pipeline completed. Final Answer: {final_answer[:100]}...")
+            
+        except Exception as e:
+            error_msg = f"Swarm pipeline error: {str(e)}"
+            self.activity_log.write(f"[System]: {error_msg}")
+            print(error_msg)
 
     def _parse_targets(self, text: str) -> Tuple[List[str], str]:
-        if text.startswith("/broadcast "):
-            message_text = text[len("/broadcast ") :].strip()
-            return self.transport.available_nodes(), message_text
-        if ":" in text:
-            node_id, message_text = text.split(":", 1)
-            node_id = node_id.strip()
-            message_text = message_text.strip()
-            if node_id:
-                return [node_id], message_text
-            return [], message_text
-        available = self.transport.available_nodes()
-        if len(available) == 1:
-            return available, text
-        if len(available) > 1:
-            return available, text
+        # Legacy method kept for interface compatibility but unused in unified mode
         return [], text
 
 
