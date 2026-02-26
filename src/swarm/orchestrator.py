@@ -61,6 +61,7 @@ class Orchestrator:
             
             # 3. Create Task Objects
             tasks = []
+            print(f"[Orchestrator] Generated {len(assignments_data)} sub-tasks:")
             for item in assignments_data:
                 task = Task(
                     task_id=str(uuid.uuid4()),
@@ -69,8 +70,7 @@ class Orchestrator:
                     status="pending"
                 )
                 tasks.append(task)
-            
-            print(f"Generated {len(tasks)} sub-tasks.")
+                print(f"  - Task: {task.description[:50]}... (Role: {task.role})")
             
             # 4. Distribute to Workers
             available_nodes = self.transport.available_nodes()
@@ -113,7 +113,7 @@ class Orchestrator:
                     
                     is_local = node_id in self.transport._workers
                     location = "LOCAL" if is_local else "REMOTE"
-                    print(f"Dispatching task '{task.description[:30]}...' to {node_id} ({location})")
+                    print(f"[Orchestrator] Dispatching task {task.task_id} to {node_id} ({location})")
 
                     assignment_msg = TaskAssignment(
                         assignment_id=str(uuid.uuid4()),

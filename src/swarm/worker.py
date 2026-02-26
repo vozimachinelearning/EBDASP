@@ -30,15 +30,23 @@ class Worker:
 
     def handle_task(self, assignment: TaskAssignment) -> TaskResult:
         task = assignment.task
-        print(f"Worker received task: {task.description} (Role: {task.role})")
+        start_time = time.time()
+        print(f"[Worker:{self.transport.node_id}] Received Task {task.task_id} | Role: {task.role}")
+        print(f"  > Description: {task.description[:100]}...")
         
         result_text = ""
         if self.llm_engine:
+            print(f"[Worker:{self.transport.node_id}] Executing with LLM...")
             prompt = f"Role: {task.role}\nTask: {task.description}\n\nPlease execute this task and provide the result."
             # Assuming generate is blocking for now
             result_text = self.llm_engine.generate(prompt)
+            print(f"[Worker:{self.transport.node_id}] LLM Generation complete ({len(result_text)} chars).")
         else:
+            print(f"[Worker:{self.transport.node_id}] Simulating execution.")
             result_text = f"Simulated execution for task: {task.description} by node {self.transport.node_id}"
+
+        duration = time.time() - start_time
+        print(f"[Worker:{self.transport.node_id}] Task {task.task_id} completed in {duration:.2f}s")
 
         return TaskResult(
             task_id=task.task_id,

@@ -64,13 +64,29 @@ class DemoWorker(Worker):
 
 
 class ConsoleRedirector:
-    def __init__(self, rich_log: RichLog) -> None:
+    def __init__(self, rich_log: RichLog, log_file: Optional[str] = None) -> None:
         self.rich_log = rich_log
         self.buffer = ""
+        self.log_file_handle = None
+        if log_file:
+            try:
+                self.log_file_handle = open(log_file, "a", encoding="utf-8")
+                self.log_file_handle.write(f"\n--- Session Started: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+            except Exception as e:
+                self.rich_log.write(f"[System] Failed to open log file: {e}")
 
     def write(self, data: str) -> None:
         if not data:
             return
+        
+        # Write to file
+        if self.log_file_handle:
+            try:
+                self.log_file_handle.write(data)
+                self.log_file_handle.flush()
+            except Exception:
+                pass
+
         # Accumulate buffer
         self.buffer += data
         
@@ -81,9 +97,24 @@ class ConsoleRedirector:
             self.rich_log.app.call_from_thread(self.rich_log.write, line)
 
     def flush(self) -> None:
+        if self.log_file_handle:
+            try:
+                self.log_file_handle.flush()
+            except Exception:
+                pass
+                
         if self.buffer:
             self.rich_log.app.call_from_thread(self.rich_log.write, self.buffer)
             self.buffer = ""
+    
+    def close(self) -> None:
+        if self.log_file_handle:
+            try:
+                self.log_file_handle.write(f"\n--- Session Ended: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                self.log_file_handle.close()
+            except Exception:
+                pass
+            self.log_file_handle = None
 
 
 class SwarmTUI(App):
@@ -156,10 +187,19 @@ class SwarmTUI(App):
         self.activity_log = self.query_one("#activity", RichLog)
         self.console_log = self.query_one("#console_log", RichLog)
         
+        # Prepare log file
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+        if not os.path.exists(log_dir):
+            try:
+                os.makedirs(log_dir)
+            except Exception:
+                pass
+        log_file = os.path.join(log_dir, f"swarm_{self.node_id}.log")
+
         # Redirect stdout/stderr
         self._original_stdout = sys.stdout
         self._original_stderr = sys.stderr
-        self._redirector = ConsoleRedirector(self.console_log)
+        self._redirector = ConsoleRedirector(self.console_log, log_file=log_file)
         sys.stdout = self._redirector
         sys.stderr = self._redirector
 
@@ -181,6 +221,10 @@ class SwarmTUI(App):
              sys.stdout = self._original_stdout
         if hasattr(self, '_original_stderr'):
              sys.stderr = self._original_stderr
+        
+        # Close log file
+        if hasattr(self, '_redirector'):
+            self._redirector.close()
 
     def _on_activity(self, event: dict) -> None:
         if threading.current_thread() is threading.main_thread():

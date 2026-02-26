@@ -144,6 +144,7 @@ class Transport:
         return response
 
     def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
+        print(f"[Transport] Sending Task {assignment.task.task_id} to {node_id}")
         worker = self._workers.get(node_id)
         if worker is not None:
             return worker.handle_task(assignment)
@@ -304,11 +305,14 @@ class NetworkTransport(Transport):
     def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
         worker = self._workers.get(node_id)
         if worker is not None:
+            print(f"[NetworkTransport] Local delivery for Task {assignment.task.task_id} to {node_id}")
             return super().send_task(node_id, assignment)
         
         if node_id not in self._node_identities:
             raise ValueError(f"Unknown remote node: {node_id}")
             
+        print(f"[NetworkTransport] Remote delivery for Task {assignment.task.task_id} to {node_id} (via Reticulum)")
+        
         # Update assignment with sender info if missing
         if not assignment.sender_node_id:
             assignment.sender_node_id = self.node_id
@@ -321,11 +325,14 @@ class NetworkTransport(Transport):
             self._pending_events[assignment.assignment_id] = event
             
         if not self._send_packet(node_id, payload):
+            print(f"[NetworkTransport] Failed to send packet for Task {assignment.task.task_id}")
             with self._pending_lock:
                 self._pending_events.pop(assignment.assignment_id, None)
             raise TimeoutError(f"No path to remote node {node_id}")
             
+        print(f"[NetworkTransport] Packet sent for Task {assignment.task.task_id}. Waiting for response...")
         if not event.wait(self._response_timeout_seconds):
+            print(f"[NetworkTransport] Timeout waiting for Task {assignment.task.task_id} response")
             with self._pending_lock:
                 self._pending_events.pop(assignment.assignment_id, None)
                 self._pending_responses.pop(assignment.assignment_id, None)
@@ -341,6 +348,7 @@ class NetworkTransport(Transport):
         if not isinstance(response, TaskResult):
             raise TypeError(f"Expected TaskResult, got {type(response)}")
             
+        print(f"[NetworkTransport] Received valid response for Task {assignment.task.task_id} from {node_id}")
         return response
 
     def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
