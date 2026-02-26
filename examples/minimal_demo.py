@@ -2,7 +2,8 @@ import os
 import threading
 import time
 import uuid
-from typing import List, Tuple
+import sys
+from typing import List, Tuple, Optional
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -11,6 +12,7 @@ from textual.widgets import DataTable, Footer, Header, Input, RichLog, Static
 from swarm import (
     AnnounceCapabilities,
     Coordinator,
+    LLMEngine,
     NetworkTransport,
     Orchestrator,
     Protocol,
@@ -24,8 +26,8 @@ from swarm import (
 
 
 class DemoWorker(Worker):
-    def __init__(self, node_id: str, domain: str, protocol: Protocol, transport: Transport) -> None:
-        super().__init__(protocol, transport, VectorStore(collection_id=domain))
+    def __init__(self, node_id: str, domain: str, protocol: Protocol, transport: Transport, llm_engine: Optional[LLMEngine] = None) -> None:
+        super().__init__(protocol, transport, VectorStore(collection_id=domain), llm_engine=llm_engine)
         self.node_id = node_id
         self.domain = domain
 
@@ -61,6 +63,29 @@ class DemoWorker(Worker):
         )
 
 
+class ConsoleRedirector:
+    def __init__(self, rich_log: RichLog) -> None:
+        self.rich_log = rich_log
+        self.buffer = ""
+
+    def write(self, data: str) -> None:
+        if not data:
+            return
+        # Accumulate buffer
+        self.buffer += data
+        
+        # Process complete lines
+        while '\n' in self.buffer:
+            line, _, self.buffer = self.buffer.partition('\n')
+            # Use call_from_thread to ensure thread safety when writing from other threads
+            self.rich_log.app.call_from_thread(self.rich_log.write, line)
+
+    def flush(self) -> None:
+        if self.buffer:
+            self.rich_log.app.call_from_thread(self.rich_log.write, self.buffer)
+            self.buffer = ""
+
+
 class SwarmTUI(App):
     CSS = """
     Screen {
@@ -74,6 +99,7 @@ class SwarmTUI(App):
     }
     #right {
         width: 60%;
+        layout: vertical;
     }
     #interfaces {
         height: 1fr;
@@ -82,7 +108,11 @@ class SwarmTUI(App):
         height: 1fr;
     }
     #activity {
-        height: 1fr;
+        height: 50%;
+        border-bottom: solid white;
+    }
+    #console_log {
+        height: 50%;
     }
     #input {
         dock: bottom;
@@ -115,6 +145,8 @@ class SwarmTUI(App):
             with Vertical(id="right"):
                 yield Static("Activity", id="activity_label")
                 yield RichLog(id="activity")
+                yield Static("System Logs", id="console_label")
+                yield RichLog(id="console_log", highlight=True, markup=True)
         yield Input(placeholder="node_id: message | /broadcast message | /exit", id="input")
         yield Footer()
 
@@ -122,6 +154,15 @@ class SwarmTUI(App):
         self.interfaces_table = self.query_one("#interfaces", DataTable)
         self.nodes_table = self.query_one("#nodes", DataTable)
         self.activity_log = self.query_one("#activity", RichLog)
+        self.console_log = self.query_one("#console_log", RichLog)
+        
+        # Redirect stdout/stderr
+        self._original_stdout = sys.stdout
+        self._original_stderr = sys.stderr
+        self._redirector = ConsoleRedirector(self.console_log)
+        sys.stdout = self._redirector
+        sys.stderr = self._redirector
+
         self.interfaces_table.add_columns("Name", "Type", "IN", "OUT", "Online", "Bitrate")
         self.nodes_table.add_columns("Node", "Domains", "Collections", "Last Seen (s)")
         self.transport.subscribe_activity(self._on_activity)
@@ -135,6 +176,11 @@ class SwarmTUI(App):
 
     def on_shutdown(self) -> None:
         self.stop_event.set()
+        # Restore stdout/stderr
+        if hasattr(self, '_original_stdout'):
+             sys.stdout = self._original_stdout
+        if hasattr(self, '_original_stderr'):
+             sys.stderr = self._original_stderr
 
     def _on_activity(self, event: dict) -> None:
         if threading.current_thread() is threading.main_thread():
@@ -236,17 +282,31 @@ def main() -> None:
     domain = os.getenv("SWARM_DOMAIN", "general")
     collections = [item.strip() for item in os.getenv("SWARM_COLLECTIONS", domain).split(",") if item.strip()]
     rns_config_dir = os.getenv("RNS_CONFIG_DIR")
+
+    # Initialize LLM Engine
+    model_path = os.getenv("SWARM_MODEL_PATH")
+    llm_engine = None
+    if model_path:
+        print(f"Initializing LLM Engine from {model_path}...")
+        try:
+            llm_engine = LLMEngine(model_path)
+            print("LLM Engine initialized successfully.")
+        except Exception as e:
+            print(f"Failed to initialize LLM Engine: {e}")
+    else:
+        print("SWARM_MODEL_PATH not set. LLM Engine will be disabled.")
+
     if network_enabled:
         transport = NetworkTransport(node_id=node_id, protocol=protocol, rns_config_dir=rns_config_dir)
         prompt = f"swarm[{node_id}]> "
     else:
         transport = Transport(node_id="coordinator")
     coordinator = Coordinator(protocol, transport, VectorStore(collection_id="root"))
-    orchestrator = Orchestrator(coordinator, transport)
+    orchestrator = Orchestrator(coordinator, transport, llm_engine=llm_engine)
 
     local_nodes: List[str] = []
     if network_enabled:
-        worker = DemoWorker(node_id, domain, protocol, transport)
+        worker = DemoWorker(node_id, domain, protocol, transport, llm_engine=llm_engine)
         transport.register_worker(node_id, worker)
         transport.announce(
             AnnounceCapabilities(
@@ -259,8 +319,8 @@ def main() -> None:
         )
         local_nodes.append(node_id)
     else:
-        worker_a = DemoWorker("worker-a", "historia", protocol, transport)
-        worker_b = DemoWorker("worker-b", "ciencia", protocol, transport)
+        worker_a = DemoWorker("worker-a", "historia", protocol, transport, llm_engine=llm_engine)
+        worker_b = DemoWorker("worker-b", "ciencia", protocol, transport, llm_engine=llm_engine)
 
         transport.register_worker("worker-a", worker_a)
         transport.register_worker("worker-b", worker_b)

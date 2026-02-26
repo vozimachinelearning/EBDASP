@@ -15,10 +15,12 @@ from .transport import NetworkTransport, Transport
 from .vector_store import VectorStore
 from .coordinator import Coordinator
 from .worker import Worker
+from .llm_engine import LLMEngine
 
 __all__ = [
     "Coordinator",
     "Worker",
+    "LLMEngine",
     "Protocol",
     "VectorStore",
     "Transport",

@@ -30,7 +30,7 @@ class Worker:
 
     def handle_task(self, assignment: TaskAssignment) -> TaskResult:
         task = assignment.task
-        # print(f"Worker received task: {task.description} (Role: {task.role})")
+        print(f"Worker received task: {task.description} (Role: {task.role})")
         
         result_text = ""
         if self.llm_engine:
