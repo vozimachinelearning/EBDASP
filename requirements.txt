@@ -2,3 +2,4 @@ reticulum
 rns
 huggingface_hub[cli]
 textual
+kivy
