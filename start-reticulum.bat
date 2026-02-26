@@ -35,9 +35,9 @@ powershell -NoProfile -Command "$path='%RNS_CONFIG_DIR%config';$content=Get-Cont
 if not exist "%SWARM_MODELS%" mkdir "%SWARM_MODELS%"
 if not exist "%SWARM_LLM_PATH%" mkdir "%SWARM_LLM_PATH%"
 if not exist "%SWARM_EMBED_PATH%" mkdir "%SWARM_EMBED_PATH%"
-python -m huggingface_hub.cli download "%SWARM_LLM_REPO%" --local-dir "%SWARM_LLM_PATH%" --local-dir-use-symlinks False
+"%VENV_DIR%\Scripts\python.exe" -c "from huggingface_hub import snapshot_download; snapshot_download('%SWARM_LLM_REPO%', local_dir=r'%SWARM_LLM_PATH%')"
 if errorlevel 1 goto :error
-python -m huggingface_hub.cli download "%SWARM_EMBED_REPO%" --local-dir "%SWARM_EMBED_PATH%" --local-dir-use-symlinks False
+"%VENV_DIR%\Scripts\python.exe" -c "from huggingface_hub import snapshot_download; snapshot_download('%SWARM_EMBED_REPO%', local_dir=r'%SWARM_EMBED_PATH%')"
 if errorlevel 1 goto :error
 start "" rnsd --config "%RNS_CONFIG_DIR%"
 timeout /t 3 /nobreak >nul
