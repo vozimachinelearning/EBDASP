@@ -801,8 +801,6 @@ class NetworkTransport(Transport):
         
         # Handle Announce specially as it uses packet details
         if isinstance(message, AnnounceCapabilities):
-            if not message.destination_hash:
-                message.destination_hash = packet.destination_hash.hex()
             if message.destination_hash:
                 self._node_destinations[message.node_id] = message.destination_hash
                 self._destination_to_node[message.destination_hash] = message.node_id
@@ -965,7 +963,7 @@ class NetworkTransport(Transport):
         # Verify hash
         stored_hash = self._node_destinations.get(node_id)
         if stored_hash and destination.hash.hex() != stored_hash:
-            print(f"[Transport] Warning: Destination hash mismatch! {destination.hash.hex()} != {stored_hash}")
+            print(f"[Transport] Warning: Destination hash mismatch for {node_id}! {destination.hash.hex()} != {stored_hash}")
             self._node_destinations[node_id] = destination.hash.hex()
             self._destination_to_node[destination.hash.hex()] = node_id
             
