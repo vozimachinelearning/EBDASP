@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import re
 import json
 import uuid
 import time
@@ -16,6 +17,53 @@ class Orchestrator:
         self.coordinator = coordinator
         self.transport = transport
         self.llm_engine = llm_engine
+
+    def _tokenize(self, text: str) -> List[str]:
+        return re.findall(r"[A-Za-z0-9]+", text.lower())
+
+    def _overlap_score(self, text: str, reference: str) -> int:
+        tokens = set(self._tokenize(text))
+        reference_tokens = set(self._tokenize(reference))
+        return len(tokens.intersection(reference_tokens))
+
+    def _filter_by_goal(self, items: List[str], goal: str, min_overlap: int = 2) -> List[str]:
+        return [item for item in items if self._overlap_score(item, goal) >= min_overlap]
+
+    def _filter_records_by_goal(self, records: List[Dict[str, Any]], goal: str, min_overlap: int = 2) -> List[Dict[str, Any]]:
+        filtered = []
+        for record in records:
+            text = str(record.get("text", ""))
+            if self._overlap_score(text, goal) >= min_overlap:
+                filtered.append(record)
+        return filtered
+
+    def _compact_text(self, text: str, limit: int = 500) -> str:
+        cleaned = " ".join(text.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit].rstrip() + "..."
+
+    def _collect_layered_context(self, query: str) -> List[Dict[str, str]]:
+        layers = [
+            ("global_context", ["global_context"], 2),
+            ("cycle_context", ["cycle_context"], 2),
+            ("task_result", ["task_result"], 3),
+            ("context_update", ["context_update"], 2),
+        ]
+        results: List[Dict[str, str]] = []
+        for layer_name, tags, limit in layers:
+            hits = self.coordinator.store.query_memory(
+                query,
+                limit=limit,
+                required_tags=tags,
+                exclude_tags=["final_answer"],
+                min_score=1,
+            )
+            for item in hits:
+                text = str(item.get("text", "")).strip()
+                if text:
+                    results.append({"layer": layer_name, "text": self._compact_text(text)})
+        return results
 
     def distribute(
         self,
@@ -61,25 +109,11 @@ class Orchestrator:
                 payload={"cycle": cycle + 1, "max_cycles": max_cycles},
             )
             # 1. Decompose
-            memory_hits = self.coordinator.store.query_memory(
-                f"{question}\n{current_context}",
-                limit=5,
-                exclude_tags=["context_update", "task_completion", "part", "final_answer", "cycle_context"],
-                min_score=2,
+            retrieval_query = f"{question}\n{current_context}"
+            layered_context = self._collect_layered_context(retrieval_query)
+            evidence_text = "\n".join(
+                [f"[{item['layer']}] {item['text']}" for item in layered_context]
             )
-            memory_context = "\n".join([item.get("text", "") for item in memory_hits])
-            probing_questions = self.llm_engine.generate_probing_queries(question, current_context)
-            evidence_hits: List[Dict[str, Any]] = []
-            for probe in probing_questions:
-                evidence_hits.extend(
-                    self.coordinator.store.query_memory(
-                        probe,
-                        limit=3,
-                        exclude_tags=["context_update", "task_completion", "part", "final_answer", "cycle_context"],
-                        min_score=1,
-                    )
-                )
-            evidence_text = "\n".join([item.get("text", "") for item in evidence_hits])
             consolidated_context = current_context
             if evidence_text:
                 consolidation_prompt = f"""
@@ -96,18 +130,18 @@ Return a concise updated context that preserves the goal and removes unrelated c
                     node_id=self.transport.node_id,
                     payload={
                         "cycle": cycle + 1,
-                        "probes": len(probing_questions),
-                        "evidence": len(evidence_hits),
+                        "layers": len(layered_context),
                         "context": consolidated_context,
                     },
                 )
             context_for_tasks = consolidated_context or current_context
             global_context_version += 1
             self._broadcast_global_context(global_context_id, global_context_version, context_for_tasks)
-            decomposition_input = f"Original Goal: {question}\nCurrent Focus: {current_context}\n\nMemory:\n{memory_context}"
+            decomposition_input = f"Original Goal: {question}\nCurrent Focus: {current_context}"
             if context_for_tasks:
-                decomposition_input = f"Original Goal: {question}\nCurrent Focus: {context_for_tasks}\n\nMemory:\n{memory_context}"
+                decomposition_input = f"Original Goal: {question}\nCurrent Focus: {context_for_tasks}"
             sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input, global_goal=question)
+            sub_tasks_desc = self._filter_by_goal(sub_tasks_desc, question)
             if not sub_tasks_desc:
                 print("No sub-tasks generated. Stopping cycles.")
                 self.transport.emit_activity(
@@ -256,10 +290,8 @@ Return a concise updated context that preserves the goal and removes unrelated c
                         sender_node_id=self.transport.node_id,
                         sender_hash=getattr(self.transport, '_destination_hash_hex', None),
                         global_goal=question,
-                        global_context=context_for_tasks,
                         global_context_id=global_context_id,
                         global_context_version=global_context_version,
-                        memory_context=memory_context,
                     )
                     
                     t = threading.Thread(target=dispatch, args=(node_id, assignment_msg))

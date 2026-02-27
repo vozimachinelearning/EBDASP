@@ -20,6 +20,12 @@ class Worker:
         self.store = store
         self.llm_engine = llm_engine
 
+    def _compact_text(self, text: str, limit: int = 400) -> str:
+        cleaned = " ".join(text.split())
+        if len(cleaned) <= limit:
+            return cleaned
+        return cleaned[:limit].rstrip() + "..."
+
     def handle_query(self, request: QueryRequest) -> QueryResponse:
         return QueryResponse(
             query_id=request.query_id,
@@ -36,49 +42,39 @@ class Worker:
         print(f"  > Description: {task.description[:100]}...")
         
         result_text = ""
-        memory_context = ""
-        global_context = assignment.global_context or ""
-        if self.store:
-            if assignment.global_context_id:
-                global_records = self.store.query_memory(
-                    "GLOBAL_CONTEXT",
-                    limit=5,
-                    required_tags=[f"context_id:{assignment.global_context_id}"],
-                    exclude_tags=["task_completion", "final_answer", "cycle_context"],
-                    min_score=1,
-                )
-                best_context = None
-                best_version = -1
-                for record in global_records:
-                    payload = self._extract_global_context_payload(str(record.get("text", "")))
-                    if not payload:
-                        continue
-                    version_value = payload.get("version")
-                    if isinstance(version_value, int) and version_value >= best_version:
-                        best_version = version_value
-                        best_context = payload.get("text")
-                if best_context:
-                    global_context = best_context
-            memories = self.store.query_memory(
-                f"{assignment.global_goal or ''}\n{task.description}",
-                limit=3,
-                exclude_tags=["context_update", "task_completion", "final_answer", "cycle_context"],
-                min_score=2,
-            )
-            if memories:
-                memory_context = "\n".join([m.get("text", "") for m in memories])
         if self.llm_engine:
             print(f"[Worker:{self.transport.node_id}] Executing with LLM...")
             global_goal = assignment.global_goal or ""
-            shared_memory = "\n".join(
-                [text for text in [assignment.memory_context, memory_context] if text]
-            )
+            retrieved_context = ""
+            if self.store:
+                query = f"{global_goal}\n{task.description}"
+                layers = [
+                    ("global_context", ["global_context"], 1),
+                    ("task_result", ["task_result"], 2),
+                ]
+                snippets = []
+                for layer_name, tags, limit in layers:
+                    hits = self.store.query_memory(
+                        query,
+                        limit=limit,
+                        required_tags=tags,
+                        exclude_tags=["final_answer", "cycle_context"],
+                        min_score=1,
+                    )
+                    for item in hits:
+                        text = str(item.get("text", "")).strip()
+                        if text:
+                            snippets.append(f"[{layer_name}] {self._compact_text(text)}")
+                if snippets:
+                    retrieved_context = "\n".join(snippets)
+            retrieved_block = ""
+            if retrieved_context:
+                retrieved_block = f"Retrieved Context:\n{retrieved_context}\n\n"
             prompt = (
                 f"Global Goal: {global_goal}\n"
-                f"Global Context: {global_context}\n"
                 f"Role: {task.role}\n"
                 f"Subtask: {task.description}\n\n"
-                f"Memory:\n{shared_memory}\n\n"
+                f"{retrieved_block}"
                 "Focus only on actions that advance the Global Goal. Do not introduce unrelated tasks. "
                 "Return the subtask result only."
             )
