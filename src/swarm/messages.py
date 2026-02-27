@@ -171,9 +171,11 @@ class TaskAssignment(Message):
 class TaskResult(Message):
     task_id: str
     assignment_id: str
+    result_id: str
     result: str
     node_id: str
     timestamp: str
+    completed: bool = True
     confidence: float = 1.0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -299,9 +301,11 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
         return TaskResult(
             task_id=data["task_id"],
             assignment_id=data.get("assignment_id", ""),
-            result=data["result"],
-            node_id=data["node_id"],
-            timestamp=data["timestamp"],
+            result_id=data.get("result_id", ""),
+            result=data.get("result", ""),
+            node_id=data.get("node_id", ""),
+            timestamp=data.get("timestamp", ""),
+            completed=bool(data.get("completed", True)),
             confidence=float(data.get("confidence", 1.0)),
         )
 

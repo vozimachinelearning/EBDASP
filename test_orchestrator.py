@@ -38,9 +38,11 @@ class MockTransport:
         return TaskResult(
             task_id=assignment.task.task_id,
             assignment_id=assignment.assignment_id,
+            result_id="result-1",
             result=f"Result from {node_id} for {assignment.task.description}",
             node_id=node_id,
-            timestamp="2024-01-01T00:00:00Z"
+            timestamp="2024-01-01T00:00:00Z",
+            completed=True
         )
     
     def route(self, request):

@@ -325,11 +325,7 @@ class NetworkTransport(Transport):
                 self._pending_events.pop(request.query_id, None)
                 self._pending_responses.pop(request.query_id, None)
             raise TimeoutError(f"No path to remote node {node_id}")
-        if not event.wait(self._response_timeout_seconds):
-            with self._pending_lock:
-                self._pending_events.pop(request.query_id, None)
-                self._pending_responses.pop(request.query_id, None)
-            raise TimeoutError(f"No response for query {request.query_id}")
+        event.wait()
         with self._pending_lock:
             response = self._pending_responses.pop(request.query_id, None)
             self._pending_events.pop(request.query_id, None)
@@ -360,14 +356,10 @@ class NetworkTransport(Transport):
         if not link:
              raise ValueError(f"Cannot establish link to {node_id}")
         
-        # Wait for link
-        deadline = time.time() + 15
         while link.status != RNS.Link.ACTIVE:
              if link.status == RNS.Link.CLOSED:
                   raise ConnectionError(f"Link to {node_id} failed")
              time.sleep(0.1)
-             if time.time() > deadline:
-                  raise TimeoutError(f"Timeout connecting to {node_id}")
 
         event = threading.Event()
         with self._pending_lock:
@@ -396,12 +388,7 @@ class NetworkTransport(Transport):
                  raise
 
         print(f"[NetworkTransport] Waiting for response for Task {assignment.task.task_id}...")
-        if not event.wait(self._response_timeout_seconds * 2): # Double timeout for large transfers
-            print(f"[NetworkTransport] Timeout waiting for Task {assignment.task.task_id} response")
-            with self._pending_lock:
-                self._pending_events.pop(assignment.assignment_id, None)
-                self._pending_responses.pop(assignment.assignment_id, None)
-            raise TimeoutError(f"No response for task {assignment.assignment_id}")
+        event.wait()
             
         with self._pending_lock:
             response = self._pending_responses.pop(assignment.assignment_id, None)

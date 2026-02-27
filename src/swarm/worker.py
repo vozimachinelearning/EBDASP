@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 from typing import Optional, TYPE_CHECKING
 
 from .messages import QueryRequest, QueryResponse, TaskAssignment, TaskResult
@@ -63,8 +64,10 @@ class Worker:
         return TaskResult(
             task_id=task.task_id,
             assignment_id=assignment.assignment_id,
+            result_id=str(uuid.uuid4()),
             result=result_text,
             node_id=self.transport.node_id,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            completed=True,
             confidence=1.0
         )

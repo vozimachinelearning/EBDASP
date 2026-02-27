@@ -79,6 +79,11 @@ class Orchestrator:
             
             # 4. Distribute to Workers
             available_nodes = self.transport.available_nodes()
+            deduped_nodes: List[str] = []
+            for node in available_nodes:
+                if node not in deduped_nodes:
+                    deduped_nodes.append(node)
+            available_nodes = deduped_nodes
             
             # Ensure local workers are included if not already
             local_workers = list(self.transport._workers.keys())
@@ -90,7 +95,13 @@ class Orchestrator:
                  print("Critical: No workers (local or remote) available to process tasks.")
                  break
             
-            print(f"Distributing tasks to {len(available_nodes)} nodes: {available_nodes}")
+            remote_nodes = [node_id for node_id in available_nodes if node_id not in local_workers]
+            if remote_nodes:
+                distribution_pool = remote_nodes
+            else:
+                distribution_pool = local_workers if local_workers else available_nodes
+
+            print(f"Distributing tasks to {len(distribution_pool)} nodes: {distribution_pool}")
 
             cycle_results: List[TaskResult] = []
             threads = []
@@ -125,9 +136,9 @@ class Orchestrator:
                 except Exception as e:
                     print(f"Error executing task on {node_id}: {e}")
 
-            if available_nodes:
+            if distribution_pool:
                 for i, task in enumerate(tasks):
-                    node_id = available_nodes[i % len(available_nodes)]
+                    node_id = distribution_pool[i % len(distribution_pool)]
                     
                     is_local = node_id in self.transport._workers
                     location = "LOCAL" if is_local else "REMOTE"
@@ -165,12 +176,14 @@ class Orchestrator:
                     {
                         "index": index,
                         "task_id": result.task_id,
+                        "part_id": result.result_id,
                         "node_id": result.node_id,
+                        "completed": result.completed,
                         "result": result.result,
                     }
                 )
             parts_text = "\n".join(
-                [f"Part {p['index']}: [{p['node_id']}] {p['result']}" for p in parts]
+                [f"Part {p['index']} ({p['part_id']}): [{p['node_id']}] {p['result']}" for p in parts]
             )
             cycle_summary = "\n".join([f"Task: {r.task_id} | Result: {r.result}" for r in ordered_results])
             
