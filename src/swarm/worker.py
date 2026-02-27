@@ -48,18 +48,21 @@ class Worker:
             retrieved_context = ""
             if self.store:
                 query = f"{global_goal}\n{task.description}"
+                context_id = assignment.global_context_id
                 layers = [
                     ("global_context", ["global_context"], 1),
                     ("task_result", ["task_result"], 2),
                 ]
                 snippets = []
                 for layer_name, tags, limit in layers:
+                    if context_id:
+                        tags = list(tags) + [f"context_id:{context_id}"]
                     hits = self.store.query_memory(
                         query,
                         limit=limit,
                         required_tags=tags,
                         exclude_tags=["final_answer", "cycle_context"],
-                        min_score=1,
+                        min_score=0.2,
                     )
                     for item in hits:
                         text = str(item.get("text", "")).strip()
@@ -89,10 +92,13 @@ class Worker:
         print(f"[Worker:{self.transport.node_id}] Task {task.task_id} completed in {duration:.2f}s")
 
         if self.store:
+            tags = [task.role, "task_result"]
+            if assignment.global_context_id:
+                tags.append(f"context_id:{assignment.global_context_id}")
             self.store.add_memory(
                 text=f"Task: {task.description}\nResult: {result_text}",
                 source=self.transport.node_id,
-                tags=[task.role, "task_result"],
+                tags=tags,
             )
 
         return TaskResult(

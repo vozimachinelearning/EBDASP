@@ -116,7 +116,7 @@ class VectorStore:
         limit: int = 5,
         required_tags: Optional[List[str]] = None,
         exclude_tags: Optional[List[str]] = None,
-        min_score: int = 1,
+        min_score: float = 0.2,
     ) -> List[Dict[str, Any]]:
         if not os.path.exists(self.memory_path):
             return []
@@ -156,7 +156,8 @@ class VectorStore:
         for record in candidates:
             embedding = record.get("embedding") or []
             score = self._cosine_sim(query_vec, embedding)
-            record["score"] = score
-            scored.append(record)
+            if score >= min_score:
+                record["score"] = score
+                scored.append(record)
         scored.sort(key=lambda item: item.get("score", 0.0), reverse=True)
         return scored[:limit]

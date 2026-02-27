@@ -43,7 +43,7 @@ class Orchestrator:
             return cleaned
         return cleaned[:limit].rstrip() + "..."
 
-    def _collect_layered_context(self, query: str) -> List[Dict[str, str]]:
+    def _collect_layered_context(self, query: str, goal: str, context_id: Optional[str]) -> List[Dict[str, str]]:
         layers = [
             ("global_context", ["global_context"], 2),
             ("cycle_context", ["cycle_context"], 2),
@@ -52,13 +52,16 @@ class Orchestrator:
         ]
         results: List[Dict[str, str]] = []
         for layer_name, tags, limit in layers:
+            if context_id and layer_name in {"global_context", "cycle_context", "context_update", "task_result"}:
+                tags = list(tags) + [f"context_id:{context_id}"]
             hits = self.coordinator.store.query_memory(
                 query,
                 limit=limit,
                 required_tags=tags,
                 exclude_tags=["final_answer"],
-                min_score=1,
+                min_score=0.2,
             )
+            hits = self._filter_records_by_goal(hits, goal, min_overlap=1)
             for item in hits:
                 text = str(item.get("text", "")).strip()
                 if text:
@@ -110,10 +113,11 @@ class Orchestrator:
             )
             # 1. Decompose
             retrieval_query = f"{question}\n{current_context}"
-            layered_context = self._collect_layered_context(retrieval_query)
+            layered_context = self._collect_layered_context(retrieval_query, question, global_context_id)
             evidence_text = "\n".join(
                 [f"[{item['layer']}] {item['text']}" for item in layered_context]
             )
+            memory_context = evidence_text
             consolidated_context = current_context
             if evidence_text:
                 consolidation_prompt = f"""
@@ -409,10 +413,13 @@ Compose a coherent final response from the parts. Preserve correct order and rem
                     node_id=self.transport.node_id,
                     payload={"cycle": cycle + 1, "context": current_context},
                 )
+                cycle_tags = ["cycle_context"]
+                if global_context_id:
+                    cycle_tags.append(f"context_id:{global_context_id}")
                 self.coordinator.store.add_memory(
                     text=f"Cycle {cycle + 1} context: {current_context}",
                     source=self.transport.node_id,
-                    tags=["cycle_context"],
+                    tags=cycle_tags,
                 )
 
         if not final_answer:
