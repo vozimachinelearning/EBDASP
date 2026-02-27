@@ -195,6 +195,12 @@ class Transport:
         expired: List[str] = []
         with self._lock:
             for node_id, last_seen in self._last_seen.items():
+                # If we have an active link, don't prune even if heartbeat is old
+                # Need to access _links safely as it's defined in NetworkTransport subclass
+                if getattr(self, '_links', None) and node_id in self._links:
+                     if self._links[node_id].status == RNS.Link.ACTIVE:
+                         continue
+
                 if now - last_seen > self.heartbeat_ttl_seconds:
                     expired.append(node_id)
             for node_id in expired:
@@ -211,9 +217,9 @@ class NetworkTransport(Transport):
         rns_config_dir: Optional[str] = None,
         app_name: str = "swarm",
         aspect: str = "transport",
-        heartbeat_ttl_seconds: float = 15.0,
+        heartbeat_ttl_seconds: float = 120.0,
         response_timeout_seconds: float = 15.0,
-        announce_interval_seconds: float = 10.0,
+        announce_interval_seconds: float = 30.0,
         time_provider: Optional[Callable[[], float]] = None,
     ) -> None:
         super().__init__(node_id=node_id, heartbeat_ttl_seconds=heartbeat_ttl_seconds, time_provider=time_provider)
@@ -476,7 +482,6 @@ class NetworkTransport(Transport):
         link.set_resource_concluded_callback(self._on_resource_concluded)
         
         self._links[node_id] = link
-        link.start()
         return link
 
     def _on_link_established(self, link: RNS.Link) -> None:
@@ -535,7 +540,16 @@ class NetworkTransport(Transport):
             if message.destination_hash:
                 self._node_destinations[message.node_id] = message.destination_hash
                 self._destination_to_node[message.destination_hash] = message.node_id
-                self._ensure_path(message.node_id, wait_seconds=0)
+                
+                # Only request path if we don't have a stable link or path
+                should_check_path = True
+                if message.node_id in self._links:
+                     link = self._links[message.node_id]
+                     if link.status == RNS.Link.ACTIVE:
+                         should_check_path = False
+                
+                if should_check_path:
+                    self._ensure_path(message.node_id, wait_seconds=0)
             super().announce(message)
             return
 
@@ -692,6 +706,10 @@ class NetworkTransport(Transport):
         packet = RNS.Packet(destination, payload)
         try:
             packet.send()
+            if not packet.sent:
+                print(f"[Transport] Packet not sent (check interfaces/path)")
+                RNS.Transport.request_path(destination.hash)
+                return False
             return True
         except Exception as e:
              print(f"[Transport] Packet send failed: {e}")
