@@ -801,7 +801,7 @@ class NetworkTransport(Transport):
         
         # Handle Announce specially as it uses packet details
         if isinstance(message, AnnounceCapabilities):
-            if message.destination_hash:
+            if message.destination_hash and message.node_id not in self._node_identities:
                 self._node_destinations[message.node_id] = message.destination_hash
                 self._destination_to_node[message.destination_hash] = message.node_id
                 
@@ -964,6 +964,8 @@ class NetworkTransport(Transport):
         stored_hash = self._node_destinations.get(node_id)
         if stored_hash and destination.hash.hex() != stored_hash:
             print(f"[Transport] Warning: Destination hash mismatch for {node_id}! {destination.hash.hex()} != {stored_hash}")
+            if stored_hash in self._destination_to_node and self._destination_to_node.get(stored_hash) == node_id:
+                self._destination_to_node.pop(stored_hash, None)
             self._node_destinations[node_id] = destination.hash.hex()
             self._destination_to_node[destination.hash.hex()] = node_id
             
@@ -1025,12 +1027,27 @@ class _AnnounceHandler:
         except Exception:
             return
         if isinstance(message, AnnounceCapabilities):
-            if not message.destination_hash:
-                message.destination_hash = destination_hash.hex()
-            if message.destination_hash:
-                self.transport._node_destinations[message.node_id] = message.destination_hash
-                self.transport._destination_to_node[message.destination_hash] = message.node_id
             if announced_identity is not None:
                 self.transport._node_identities[message.node_id] = announced_identity
                 self.transport._identity_hash_to_node_id[announced_identity.hash] = message.node_id
+                destination = RNS.Destination(
+                    announced_identity,
+                    RNS.Destination.OUT,
+                    RNS.Destination.SINGLE,
+                    self.transport._app_name,
+                    self.transport._aspect,
+                )
+                expected_hash = destination.hash.hex()
+                if message.destination_hash and message.destination_hash != expected_hash:
+                    print(
+                        f"[Transport] Warning: Announce hash mismatch for {message.node_id}! "
+                        f"{message.destination_hash} != {expected_hash}"
+                    )
+                previous_hash = self.transport._node_destinations.get(message.node_id)
+                if previous_hash and previous_hash in self.transport._destination_to_node:
+                    if self.transport._destination_to_node.get(previous_hash) == message.node_id:
+                        self.transport._destination_to_node.pop(previous_hash, None)
+                message.destination_hash = expected_hash
+                self.transport._node_destinations[message.node_id] = expected_hash
+                self.transport._destination_to_node[expected_hash] = message.node_id
             super(NetworkTransport, self.transport).announce(message)
