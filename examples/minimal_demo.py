@@ -195,6 +195,7 @@ class SwarmTUI(App):
             except Exception:
                 pass
         log_file = os.path.join(log_dir, f"swarm_{self.node_id}.log")
+        activity_log_file = os.path.join(log_dir, f"swarm_activity_{self.node_id}.log")
 
         # Redirect stdout/stderr
         self._original_stdout = sys.stdout
@@ -202,6 +203,12 @@ class SwarmTUI(App):
         self._redirector = ConsoleRedirector(self.console_log, log_file=log_file)
         sys.stdout = self._redirector
         sys.stderr = self._redirector
+        self._activity_log_handle = None
+        try:
+            self._activity_log_handle = open(activity_log_file, "a", encoding="utf-8")
+            self._activity_log_handle.write(f"\n--- Session Started: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+        except Exception:
+            self._activity_log_handle = None
 
         self.interfaces_table.add_columns("Name", "Type", "IN", "OUT", "Online", "Bitrate")
         self.nodes_table.add_columns("Node", "Domains", "Collections", "Last Seen (s)")
@@ -225,6 +232,32 @@ class SwarmTUI(App):
         # Close log file
         if hasattr(self, '_redirector'):
             self._redirector.close()
+        if hasattr(self, '_activity_log_handle') and self._activity_log_handle:
+            try:
+                self._activity_log_handle.write(f"\n--- Session Ended: {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n")
+                self._activity_log_handle.close()
+            except Exception:
+                pass
+            self._activity_log_handle = None
+
+    def _write_activity(self, line: str) -> None:
+        timestamp = time.strftime("%H:%M:%S")
+        message = f"[{timestamp}] {line}"
+        if threading.current_thread() is threading.main_thread():
+            self.activity_log.write(message)
+        else:
+            self.call_from_thread(self.activity_log.write, message)
+        if getattr(self, "_activity_log_handle", None):
+            try:
+                self._activity_log_handle.write(message + "\n")
+                self._activity_log_handle.flush()
+            except Exception:
+                pass
+
+    def _write_activity_block(self, title: str, lines: List[str]) -> None:
+        self._write_activity(f"{title}")
+        for line in lines:
+            self._write_activity(f"  {line}")
 
     def _on_activity(self, event: dict) -> None:
         if threading.current_thread() is threading.main_thread():
@@ -239,7 +272,7 @@ class SwarmTUI(App):
         payload = event.get("payload", {})
         sender = payload.get("sender") or event.get("node_id") or "swarm"
         text = payload.get("text", "")
-        self.activity_log.write(f"[{timestamp}] {sender}: {text}")
+        self._write_activity(f"{sender}: {text}")
 
     def refresh_status(self) -> None:
         self.interfaces_table.clear()
@@ -287,7 +320,9 @@ class SwarmTUI(App):
         2. Distribute tasks to available nodes (local + remote).
         3. Consolidate results into a final response.
         """
-        self.activity_log.write(f"[Me]: {user_input}")
+        pipeline_id = str(uuid.uuid4())
+        self._write_activity(f"[Pipeline {pipeline_id}] START")
+        self._write_activity(f"[Pipeline {pipeline_id}] Query: {user_input}")
         print(f"Starting swarm pipeline for: {user_input}")
         
         try:
@@ -296,15 +331,50 @@ class SwarmTUI(App):
             results = self.orchestrator.decompose_and_distribute(user_input)
             
             final_answer = results.get('final_answer', 'No answer generated.')
+            parts = results.get("parts", [])
+            if parts:
+                self._write_activity_block(f"[Pipeline {pipeline_id}] Subtask Responses", [f"count={len(parts)}"])
+                for part in parts:
+                    part_id = part.get("part_id", "")
+                    node_id = part.get("node_id", "")
+                    completed = part.get("completed", True)
+                    task_id = part.get("task_id", "")
+                    self._write_activity_block(
+                        f"[Pipeline {pipeline_id}] Subtask {task_id}",
+                        [
+                            f"node={node_id}",
+                            f"part_id={part_id}",
+                            f"completed={completed}",
+                            "response:",
+                            f"{part.get('result','')}",
+                        ],
+                    )
+            results_list = results.get("results", [])
+            for item in results_list:
+                evidence = item.get("evidence", [])
+                if evidence:
+                    for chunk in evidence:
+                        chunk_id = chunk.get("chunk_id", "")
+                        source = chunk.get("source", "")
+                        text = chunk.get("text", "")
+                        self._write_activity_block(
+                            f"[Pipeline {pipeline_id}] Evidence {chunk_id}",
+                            [f"source={source}", "text:", f"{text}"],
+                        )
             
             # Display the result in the activity log (chat view)
-            self.activity_log.write(f"[Swarm]: {final_answer}")
+            self._write_activity_block(
+                f"[Pipeline {pipeline_id}] FINAL",
+                ["response:", f"{final_answer}"],
+            )
             print(f"Pipeline completed. Final Answer: {final_answer[:100]}...")
             
         except Exception as e:
             error_msg = f"Swarm pipeline error: {str(e)}"
-            self.activity_log.write(f"[System]: {error_msg}")
+            self._write_activity(f"[Pipeline {pipeline_id}] ERROR {error_msg}")
             print(error_msg)
+        finally:
+            self._write_activity(f"[Pipeline {pipeline_id}] END")
 
     def _parse_targets(self, text: str) -> Tuple[List[str], str]:
         # Legacy method kept for interface compatibility but unused in unified mode
