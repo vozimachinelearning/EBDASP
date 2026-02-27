@@ -31,6 +31,8 @@ class MockLLMEngine:
             return "Status: DONE\nContent: Mock Final Answer"
         if "assembling a response" in prompt:
             return "Mock Final Answer"
+        if "final long answer" in prompt or "Write a comprehensive" in prompt:
+            return "Mock Final Answer"
         return "Mock Response"
 
     def generate_probing_queries(self, query: str, context: str, max_items: int = 5) -> List[str]:

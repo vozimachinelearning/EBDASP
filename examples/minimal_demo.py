@@ -3,7 +3,8 @@ import threading
 import time
 import uuid
 import sys
-from typing import List, Tuple, Optional
+import json
+from typing import List, Tuple, Optional, Dict
 
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical
@@ -167,6 +168,73 @@ class SwarmTUI(App):
         self.node_id = node_id
         self.network_enabled = network_enabled
         self.stop_event = stop_event
+        self._eval_map = self._load_eval_map(os.getenv("SWARM_EVAL_QAS_PATH"))
+        self._eval_min_words = int(os.getenv("SWARM_EVAL_MIN_WORDS", "80"))
+        self._eval_always = os.getenv("SWARM_EVAL_ALWAYS", "0").lower() in {"1", "true", "yes"}
+        self._batch_eval_enabled = os.getenv("SWARM_BATCH_EVAL", "0").lower() in {"1", "true", "yes"}
+        self._batch_eval_limit = int(os.getenv("SWARM_BATCH_EVAL_LIMIT", "0") or "0")
+        self._batch_eval_offset = int(os.getenv("SWARM_BATCH_EVAL_OFFSET", "0") or "0")
+        self._batch_eval_path = os.getenv("SWARM_EVAL_QAS_PATH")
+
+    def _load_eval_map(self, path: Optional[str]) -> Dict[str, List[str]]:
+        if not path or not os.path.exists(path):
+            return {}
+        mapping: Dict[str, List[str]] = {}
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    question = str(item.get("question", "")).strip()
+                    if not question:
+                        continue
+                    golden = item.get("golden_answers") or item.get("answers") or []
+                    if isinstance(golden, str):
+                        golden = [golden]
+                    if isinstance(golden, list):
+                        golden_list = [str(ans).strip() for ans in golden if str(ans).strip()]
+                    else:
+                        golden_list = []
+                    if golden_list:
+                        mapping[question.lower()] = golden_list
+        except Exception:
+            return {}
+        return mapping
+
+    def _load_eval_items(self, path: Optional[str]) -> List[Dict[str, List[str]]]:
+        if not path or not os.path.exists(path):
+            return []
+        items: List[Dict[str, List[str]]] = []
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                for line in handle:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except Exception:
+                        continue
+                    question = str(item.get("question", "")).strip()
+                    if not question:
+                        continue
+                    golden = item.get("golden_answers") or item.get("answers") or []
+                    if isinstance(golden, str):
+                        golden = [golden]
+                    if isinstance(golden, list):
+                        golden_list = [str(ans).strip() for ans in golden if str(ans).strip()]
+                    else:
+                        golden_list = []
+                    if golden_list:
+                        items.append({"question": question, "golden_answers": golden_list})
+        except Exception:
+            return []
+        return items
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -227,6 +295,8 @@ class SwarmTUI(App):
                     f"[{time.strftime('%H:%M:%S')}] interface {interface['name']} {interface['type']} in={interface['in']} out={interface['out']} online={interface['online']} bitrate={interface['bitrate']}"
                 )
         self.set_interval(1.0, self.refresh_status)
+        if self._batch_eval_enabled and self._batch_eval_path:
+            threading.Thread(target=self._run_batch_evaluation, daemon=True).start()
 
     def on_shutdown(self) -> None:
         self.stop_event.set()
@@ -253,7 +323,10 @@ class SwarmTUI(App):
         if threading.current_thread() is threading.main_thread():
             self.activity_log.write(message)
         else:
-            self.call_from_thread(self.activity_log.write, message)
+            try:
+                self.call_from_thread(self.activity_log.write, message)
+            except RuntimeError:
+                self.activity_log.write(message)
         if getattr(self, "_activity_log_handle", None):
             try:
                 self._activity_log_handle.write(message + "\n")
@@ -270,7 +343,10 @@ class SwarmTUI(App):
         if threading.current_thread() is threading.main_thread():
             self._append_activity(event)
             return
-        self.call_from_thread(self._append_activity, event)
+        try:
+            self.call_from_thread(self._append_activity, event)
+        except RuntimeError:
+            self._append_activity(event)
 
     def _append_activity(self, event: dict) -> None:
         event_name = event.get("event")
@@ -349,6 +425,16 @@ class SwarmTUI(App):
             return
         if event_name == "pipeline_final":
             self._write_activity_block("Final Answer", ["response:", f"{payload.get('final_answer','')}"])
+            return
+        if event_name == "pipeline_evaluation":
+            self._write_activity_block(
+                "Evaluation",
+                [
+                    f"em={payload.get('em')}",
+                    f"f1={payload.get('f1')}",
+                    f"answers={payload.get('answers_count')}",
+                ],
+            )
             return
         if event_name == "pipeline_no_tasks":
             self._write_activity_block("No Tasks Generated", [f"node={node_id}"])
@@ -443,7 +529,14 @@ class SwarmTUI(App):
         try:
             # Use the orchestrator to manage the full cycle
             # This handles decomposition, distribution, and consolidation
-            results = self.orchestrator.decompose_and_distribute(user_input)
+            golden_answers = None
+            if self._eval_map:
+                golden_answers = self._eval_map.get(user_input.lower())
+            should_eval = bool(golden_answers) and (self._eval_always or len(user_input.split()) >= self._eval_min_words)
+            if should_eval:
+                results = self.orchestrator.decompose_and_distribute(user_input, golden_answers=golden_answers)
+            else:
+                results = self.orchestrator.decompose_and_distribute(user_input)
             
             final_answer = results.get('final_answer', 'No answer generated.')
             parts = results.get("parts", [])
@@ -482,6 +575,16 @@ class SwarmTUI(App):
                 f"[Pipeline {pipeline_id}] FINAL",
                 ["response:", f"{final_answer}"],
             )
+            evaluation = results.get("evaluation")
+            if evaluation:
+                self._write_activity_block(
+                    f"[Pipeline {pipeline_id}] Evaluation",
+                    [
+                        f"em={evaluation.get('em')}",
+                        f"f1={evaluation.get('f1')}",
+                        f"answers={evaluation.get('answers_count')}",
+                    ],
+                )
             print(f"Pipeline completed. Final Answer: {final_answer[:100]}...")
             
         except Exception as e:
@@ -490,6 +593,78 @@ class SwarmTUI(App):
             print(error_msg)
         finally:
             self._write_activity(f"[Pipeline {pipeline_id}] END")
+
+    def _run_batch_evaluation(self) -> None:
+        items = self._load_eval_items(self._batch_eval_path)
+        if not items:
+            self._write_activity("Batch evaluation: no QAS items found.")
+            return
+        start = max(0, self._batch_eval_offset)
+        end = len(items)
+        if self._batch_eval_limit and self._batch_eval_limit > 0:
+            end = min(end, start + self._batch_eval_limit)
+        total = max(0, end - start)
+        if total == 0:
+            self._write_activity("Batch evaluation: empty range.")
+            return
+        self._write_activity_block(
+            "Batch Evaluation",
+            [f"items={total}", f"offset={start}", f"limit={self._batch_eval_limit or 'all'}"],
+        )
+        em_sum = 0.0
+        f1_sum = 0.0
+        completed = 0
+        for idx in range(start, end):
+            item = items[idx]
+            question = item["question"]
+            golden_answers = item["golden_answers"]
+            try:
+                results = self.orchestrator.decompose_and_distribute(
+                    question,
+                    golden_answers=golden_answers,
+                )
+            except Exception as e:
+                self._write_activity_block(
+                    "Batch Evaluation Error",
+                    [f"index={idx}", f"question={question}", f"error={str(e)}"],
+                )
+                continue
+            evaluation = results.get("evaluation") or {}
+            em = float(evaluation.get("em", 0.0) or 0.0)
+            f1 = float(evaluation.get("f1", 0.0) or 0.0)
+            em_sum += em
+            f1_sum += f1
+            completed += 1
+            self._write_activity_block(
+                "Batch Item",
+                [f"index={idx}", f"em={em}", f"f1={f1}", f"question={question}"],
+            )
+        if completed == 0:
+            self._write_activity("Batch evaluation: no completed items.")
+            return
+        avg_em = round(em_sum / completed, 4)
+        avg_f1 = round(f1_sum / completed, 4)
+        self._write_activity_block(
+            "Batch Summary",
+            [f"completed={completed}", f"avg_em={avg_em}", f"avg_f1={avg_f1}"],
+        )
+        try:
+            self.orchestrator.coordinator.store.add_memory(
+                text=json.dumps(
+                    {
+                        "batch_eval": {
+                            "completed": completed,
+                            "avg_em": avg_em,
+                            "avg_f1": avg_f1,
+                        }
+                    },
+                    ensure_ascii=False,
+                ),
+                source=self.node_id,
+                tags=["evaluation_batch"],
+            )
+        except Exception:
+            pass
 
     def _parse_targets(self, text: str) -> Tuple[List[str], str]:
         # Legacy method kept for interface compatibility but unused in unified mode

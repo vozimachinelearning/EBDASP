@@ -68,6 +68,69 @@ class Orchestrator:
             tasks.append(description)
         return tasks
 
+    def _normalize_topic(self, text: str) -> str:
+        cleaned = re.sub(r"^[Ww]hat\s+is\s+|^[Ww]hat\s+are\s+|^[Hh]ow\s+to\s+|^[Hh]ow\s+does\s+|^[Ww]hy\s+|^[Ww]hen\s+|^[Ww]here\s+", "", text).strip()
+        cleaned = cleaned.strip().strip('"').strip("'")
+        cleaned = cleaned.rstrip("?.!:;")
+        cleaned = re.sub(r"\s+", " ", cleaned)
+        if len(cleaned) < 4:
+            return ""
+        return cleaned
+
+    def _looks_like_json(self, text: str) -> bool:
+        stripped = text.strip()
+        return bool(stripped) and (stripped.startswith("{") or stripped.startswith("["))
+
+    def _normalize_eval_text(self, text: str) -> str:
+        lowered = text.lower()
+        lowered = re.sub(r"\b(a|an|the)\b", " ", lowered)
+        lowered = re.sub(r"[^a-z0-9\s]", " ", lowered)
+        lowered = re.sub(r"\s+", " ", lowered).strip()
+        return lowered
+
+    def _tokenize_eval_text(self, text: str) -> List[str]:
+        normalized = self._normalize_eval_text(text)
+        if not normalized:
+            return []
+        return normalized.split()
+
+    def _compute_exact_match(self, prediction: str, gold: str) -> float:
+        return 1.0 if self._normalize_eval_text(prediction) == self._normalize_eval_text(gold) else 0.0
+
+    def _compute_f1(self, prediction: str, gold: str) -> float:
+        pred_tokens = self._tokenize_eval_text(prediction)
+        gold_tokens = self._tokenize_eval_text(gold)
+        if not pred_tokens and not gold_tokens:
+            return 1.0
+        if not pred_tokens or not gold_tokens:
+            return 0.0
+        common = {}
+        for token in pred_tokens:
+            common[token] = common.get(token, 0) + 1
+        num_same = 0
+        for token in gold_tokens:
+            if common.get(token, 0) > 0:
+                common[token] -= 1
+                num_same += 1
+        if num_same == 0:
+            return 0.0
+        precision = num_same / len(pred_tokens)
+        recall = num_same / len(gold_tokens)
+        return 2 * precision * recall / (precision + recall)
+
+    def _evaluate_answer(self, prediction: str, golden_answers: List[str]) -> Dict[str, Any]:
+        if not golden_answers:
+            return {}
+        em_scores = [self._compute_exact_match(prediction, gold) for gold in golden_answers]
+        f1_scores = [self._compute_f1(prediction, gold) for gold in golden_answers]
+        best_em = max(em_scores) if em_scores else 0.0
+        best_f1 = max(f1_scores) if f1_scores else 0.0
+        return {
+            "em": round(best_em, 4),
+            "f1": round(best_f1, 4),
+            "answers_count": len(golden_answers),
+        }
+
     def _collect_layered_context(self, query: str, goal: str, context_id: Optional[str]) -> List[Dict[str, str]]:
         layers = [
             ("global_context", ["global_context"], 2),
@@ -112,7 +175,7 @@ class Orchestrator:
         route_response = self.transport.route(route_request)
         return [self.transport.send_query(node_id, request) for node_id in route_response.node_ids]
 
-    def decompose_and_distribute(self, question: str, max_cycles: int = 2) -> Dict[str, Any]:
+    def decompose_and_distribute(self, question: str, max_cycles: int = 2, golden_answers: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Implements ComoRAG-inspired task decomposition and distributed execution with iterative cycles.
         """
@@ -124,7 +187,8 @@ class Orchestrator:
         
         enhanced = self.llm_engine.enhance_query(question)
         enhanced_query = enhanced.get("enhanced_query") or question
-        topics = self._dedupe_items(enhanced.get("topics") or [])
+        topics = self._dedupe_items([self._normalize_topic(t) for t in (enhanced.get("topics") or [])])
+        topics = [t for t in topics if t]
         probing_queries = self._dedupe_items(enhanced.get("probing_queries") or [])
         current_context = enhanced_query
         global_context_id = str(uuid.uuid4())
@@ -172,6 +236,12 @@ class Orchestrator:
             if probing_queries:
                 probes_text = "; ".join(probing_queries)
                 memory_context = "\n".join([text for text in [memory_context, f"[probes] {probes_text}"] if text])
+            if len(topics) < 2 and probing_queries:
+                derived_topics = [self._normalize_topic(p) for p in probing_queries]
+                derived_topics = [t for t in derived_topics if t]
+                topics = self._dedupe_items(topics + derived_topics)[:6]
+            if not topics:
+                topics = [self._normalize_topic(enhanced_query) or enhanced_query]
             if self.coordinator.store and probing_queries:
                 probe_records = []
                 for probe in probing_queries:
@@ -218,6 +288,9 @@ Return a concise updated context that preserves the goal and removes unrelated c
             if not sub_tasks_desc:
                 sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input, global_goal=question)
                 sub_tasks_desc = self._filter_by_goal(sub_tasks_desc, question) or sub_tasks_desc
+            if len(sub_tasks_desc) < 2 and probing_queries:
+                probe_tasks = [f"Answer probe with evidence: {probe}" for probe in probing_queries[:3]]
+                sub_tasks_desc = self._dedupe_items(sub_tasks_desc + probe_tasks)
             if not sub_tasks_desc:
                 print("No sub-tasks generated. Stopping cycles.")
                 self.transport.emit_activity(
@@ -461,6 +534,13 @@ Content: [Final Answer or Next Steps]
             print(f"[Orchestrator] Cycle {cycle + 1} Analysis: {status_line}")
             content_start = response.find("Content:")
             content = response[content_start + 8:].strip() if content_start != -1 else response
+            needs_more = False
+            if "gaps" in evidence_map:
+                if re.search(r'"gaps"\s*:\s*\[(?!\s*\])', evidence_map):
+                    needs_more = True
+            if "DONE" in status_line and needs_more:
+                status_line = "Status: CONTINUE"
+                content = f"Resolve remaining gaps: {evidence_map}"
 
             if "DONE" in status_line:
                 assembly_prompt = f"""
@@ -476,13 +556,41 @@ Parts:
 
 Compose a coherent final response from the parts. Preserve correct order and remove duplication.
 """
-                final_answer = self.llm_engine.generate(assembly_prompt)
+                draft_answer = self.llm_engine.generate(assembly_prompt)
+                synthesis_prompt = f"""
+You are producing the final long answer for the user.
+Original Question: {question}
+Enhanced Query: {enhanced_query}
+Evidence Map:
+{evidence_map}
+Draft:
+{draft_answer}
+
+Write a comprehensive, well-structured answer in natural language. Avoid JSON or lists-only output. Use paragraphs. Ensure completeness.
+"""
+                final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=900, temperature=0.3)
+                if self._looks_like_json(final_answer) or len(final_answer.split()) < 120:
+                    final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=1100, temperature=0.4)
                 print(f"Task completed. Final Answer: {final_answer[:200]}...")
                 self.transport.emit_activity(
                     "pipeline_final",
                     node_id=self.transport.node_id,
                     payload={"final_answer": final_answer},
                 )
+                evaluation = None
+                if golden_answers:
+                    evaluation = self._evaluate_answer(final_answer, golden_answers)
+                    if self.coordinator.store:
+                        self.coordinator.store.add_memory(
+                            text=json.dumps({"question": question, "evaluation": evaluation}, ensure_ascii=False),
+                            source=self.transport.node_id,
+                            tags=["evaluation", f"context_id:{global_context_id}"],
+                        )
+                    self.transport.emit_activity(
+                        "pipeline_evaluation",
+                        node_id=self.transport.node_id,
+                        payload=evaluation,
+                    )
                 self.coordinator.store.add_memory(
                     text=f"Q: {question}\nA: {final_answer}",
                     source=self.transport.node_id,
@@ -523,7 +631,8 @@ Compose a coherent final response from the parts. Preserve correct order and rem
             "sub_tasks_count": len(all_results),
             "results": [r.to_dict() for r in all_results],
             "parts": [item for item in parts] if 'parts' in locals() else [],
-            "final_answer": final_answer
+            "final_answer": final_answer,
+            "evaluation": evaluation if "evaluation" in locals() else None,
         }
 
     def _build_global_context_content(self, context_id: str, version: int, text: str) -> str:

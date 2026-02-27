@@ -47,6 +47,22 @@ class LLMEngine:
         except Exception:
             return None
 
+    def _clean_probe(self, text: str) -> str:
+        cleaned = text.strip().strip('"').strip("'")
+        cleaned = cleaned.replace("\\", "").strip()
+        if not cleaned:
+            return ""
+        if cleaned.lower().startswith("questions:"):
+            cleaned = cleaned.split(":", 1)[1].strip()
+        if cleaned.startswith("-"):
+            cleaned = cleaned.lstrip("-").strip()
+        if any(token in cleaned for token in ["{", "}", "[", "]"]):
+            return ""
+        cleaned = cleaned.strip()
+        if len(cleaned) < 4:
+            return ""
+        return cleaned
+
     def enhance_query(self, query: str, max_topics: int = 6, max_probes: int = 8) -> dict:
         prompt = f"""
 You are enhancing a user query for a multi-agent evidence pipeline.
@@ -63,8 +79,12 @@ Query: {query}
             enhanced_query = str(parsed.get("enhanced_query") or "").strip() or query
             topics = parsed.get("topics") if isinstance(parsed.get("topics"), list) else []
             probes = parsed.get("probing_queries") if isinstance(parsed.get("probing_queries"), list) else []
-            topics = [str(item).strip() for item in topics if str(item).strip()][:max_topics]
-            probes = [str(item).strip() for item in probes if str(item).strip()][:max_probes]
+            topics = [self._clean_probe(str(item)) for item in topics]
+            topics = [item for item in topics if item][:max_topics]
+            probes = [self._clean_probe(str(item)) for item in probes]
+            probes = [item for item in probes if item][:max_probes]
+            if not topics and probes:
+                topics = probes[:max_topics]
             return {
                 "enhanced_query": enhanced_query,
                 "topics": topics,
@@ -83,9 +103,13 @@ Return a JSON array of strings only.
         response = self.generate(prompt, max_new_tokens=256, temperature=0.4)
         parsed = self._safe_json(response)
         if isinstance(parsed, list):
-            return [str(item).strip() for item in parsed if str(item).strip()][:max_items]
+            cleaned = [self._clean_probe(str(item)) for item in parsed]
+            cleaned = [item for item in cleaned if item]
+            return cleaned[:max_items]
         lines = [line.strip("- ").strip() for line in response.split("\n") if line.strip()]
-        return lines[:max_items]
+        cleaned = [self._clean_probe(line) for line in lines]
+        cleaned = [item for item in cleaned if item]
+        return cleaned[:max_items]
 
     def decompose_task(self, task_description: str, global_goal: Optional[str] = None) -> List[str]:
         """

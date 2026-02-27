@@ -112,7 +112,10 @@ class Transport:
         }
         self._activity.append(activity)
         for callback in self._activity_callbacks:
-            callback(activity)
+            try:
+                callback(activity)
+            except Exception:
+                continue
         return activity
 
     def route(self, request: RouteRequest) -> RouteResponse:
