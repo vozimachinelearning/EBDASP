@@ -38,6 +38,8 @@ class Transport:
         self._activity_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         self._completion_ledger: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._context_chunk_buffer: Dict[str, Dict[str, Any]] = {}
+        self._max_context_chunk_size = 8000
 
     def register_worker(self, node_id: str, worker: Worker) -> None:
         with self._lock:
@@ -194,29 +196,13 @@ class Transport:
         return False
 
     def send_context_update(self, node_id: str, content: str, context_id: Optional[str] = None) -> bool:
-        update = ContextUpdate(
-            context_id=context_id or str(uuid.uuid4()),
-            content=content,
-            source_node=self.node_id,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
-        )
-        if node_id in self._workers:
-            for worker in self._workers.values():
-                if worker.store:
-                    tags = ["context_update"]
-                    payload = self._extract_global_context_payload(update.content)
-                    if payload:
-                        context_id_value = payload.get("context_id")
-                        if context_id_value:
-                            tags.append("global_context")
-                            tags.append(f"context_id:{context_id_value}")
-                        version_value = payload.get("version")
-                        if version_value is not None:
-                            tags.append(f"context_version:{version_value}")
-                    worker.store.add_memory(update.content, update.source_node, tags=tags)
-            self._record_completion_from_content(update.content, update.source_node, update.context_id)
-            return True
-        return False
+        if node_id not in self._workers:
+            return False
+        context_id_value = context_id or str(uuid.uuid4())
+        chunks = self._build_context_chunks(content, context_id_value)
+        for chunk in chunks:
+            self._handle_context_update(chunk, self.node_id, context_id_value)
+        return True
 
     def get_completion_ledger(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
@@ -283,6 +269,118 @@ class Transport:
             "version": version_value,
             "text": "\n".join(text_lines).strip(),
         }
+
+    def _build_context_chunks(self, content: str, context_id: str) -> List[str]:
+        if len(content) <= self._max_context_chunk_size:
+            return [content]
+        payloads = [
+            content[i : i + self._max_context_chunk_size]
+            for i in range(0, len(content), self._max_context_chunk_size)
+        ]
+        total = len(payloads)
+        chunks = []
+        for index, payload in enumerate(payloads):
+            chunks.append(
+                "\n".join(
+                    [
+                        "CONTEXT_CHUNK",
+                        f"context_id: {context_id}",
+                        f"chunk_index: {index}",
+                        f"chunk_total: {total}",
+                        "payload:",
+                        payload,
+                    ]
+                )
+            )
+        return chunks
+
+    def _parse_context_chunk(self, content: str) -> Optional[Dict[str, Any]]:
+        lines = content.splitlines()
+        if not lines:
+            return None
+        if lines[0].strip() != "CONTEXT_CHUNK":
+            return None
+        chunk_index = None
+        chunk_total = None
+        context_id_value = None
+        payload_lines: List[str] = []
+        in_payload = False
+        for line in lines[1:]:
+            if line.startswith("context_id:"):
+                context_id_value = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("chunk_index:"):
+                raw = line.split(":", 1)[1].strip()
+                try:
+                    chunk_index = int(raw)
+                except Exception:
+                    chunk_index = None
+                continue
+            if line.startswith("chunk_total:"):
+                raw = line.split(":", 1)[1].strip()
+                try:
+                    chunk_total = int(raw)
+                except Exception:
+                    chunk_total = None
+                continue
+            if line.startswith("payload:"):
+                in_payload = True
+                continue
+            if in_payload:
+                payload_lines.append(line)
+        if context_id_value is None or chunk_index is None or chunk_total is None:
+            return None
+        return {
+            "context_id": context_id_value,
+            "chunk_index": chunk_index,
+            "chunk_total": chunk_total,
+            "payload": "\n".join(payload_lines),
+        }
+
+    def _handle_context_update(self, content: str, source_node: str, context_id: str) -> None:
+        chunk = self._parse_context_chunk(content)
+        if not chunk:
+            self._handle_full_context_update(content, source_node, context_id)
+            return
+        chunk_id = chunk["context_id"]
+        with self._lock:
+            entry = self._context_chunk_buffer.get(chunk_id)
+            if not entry:
+                entry = {
+                    "total": chunk["chunk_total"],
+                    "received": {},
+                    "source_node": source_node,
+                    "timestamp": self._time_provider(),
+                }
+                self._context_chunk_buffer[chunk_id] = entry
+            entry["received"][chunk["chunk_index"]] = chunk["payload"]
+            if len(entry["received"]) < entry["total"]:
+                return
+            payloads = [entry["received"].get(i, "") for i in range(entry["total"])]
+            full_content = "".join(payloads)
+            self._context_chunk_buffer.pop(chunk_id, None)
+        self._handle_full_context_update(full_content, source_node, context_id)
+
+    def _handle_full_context_update(self, content: str, source_node: str, context_id: str) -> None:
+        for worker in self._workers.values():
+            if worker.store:
+                tags = ["context_update"]
+                payload = self._extract_global_context_payload(content)
+                if payload:
+                    context_id_value = payload.get("context_id")
+                    if context_id_value:
+                        tags.append("global_context")
+                        tags.append(f"context_id:{context_id_value}")
+                    version_value = payload.get("version")
+                    if version_value is not None:
+                        tags.append(f"context_version:{version_value}")
+                worker.store.add_memory(content, source_node, tags=tags)
+        self._record_completion_from_content(content, source_node, context_id)
+        self.emit_activity(
+            "context_update",
+            node_id=source_node,
+            payload={"context_id": context_id},
+        )
 
     def _prune_stale(self) -> None:
         now = self._time_provider()
@@ -451,7 +549,7 @@ class NetworkTransport(Transport):
         event = threading.Event()
         with self._pending_lock:
             self._pending_events[request.query_id] = event
-        if not self._send_packet(node_id, payload):
+        if not self._send_payload(node_id, payload):
             with self._pending_lock:
                 self._pending_events.pop(request.query_id, None)
                 self._pending_responses.pop(request.query_id, None)
@@ -551,7 +649,7 @@ class NetworkTransport(Transport):
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
         )
         payload = self.protocol.encode_binary(message)
-        if not self._send_packet(node_id, payload):
+        if not self._send_payload(node_id, payload):
             return False
         self.emit_activity(
             "message_sent",
@@ -570,14 +668,19 @@ class NetworkTransport(Transport):
             return super().send_context_update(node_id, content, context_id=context_id)
         if node_id not in self._node_identities:
             return False
-        update = ContextUpdate(
-            context_id=context_id or str(uuid.uuid4()),
-            content=content,
-            source_node=self.node_id,
-            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
-        )
-        payload = self.protocol.encode_binary(update)
-        return self._send_packet(node_id, payload)
+        context_id_value = context_id or str(uuid.uuid4())
+        chunks = self._build_context_chunks(content, context_id_value)
+        for chunk in chunks:
+            update = ContextUpdate(
+                context_id=context_id_value,
+                content=chunk,
+                source_node=self.node_id,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
+            )
+            payload = self.protocol.encode_binary(update)
+            if not self._send_payload(node_id, payload):
+                return False
+        return True
 
     def interface_status(self) -> List[Dict[str, Any]]:
         interfaces = []
@@ -726,9 +829,9 @@ class NetworkTransport(Transport):
             if reply_to_node_id or reply_to:
                 payload = self.protocol.encode_binary(response)
                 if reply_to_node_id and reply_to_node_id in self._node_identities:
-                    self._send_packet(reply_to_node_id, payload)
+                    self._send_payload(reply_to_node_id, payload)
                 elif reply_to and reply_to in self._destination_to_node:
-                    self._send_packet(self._destination_to_node[reply_to], payload)
+                    self._send_payload(self._destination_to_node[reply_to], payload)
             return
         if isinstance(message, TaskAssignment):
             worker = None
@@ -768,10 +871,10 @@ class NetworkTransport(Transport):
                     # self._send_packet uses node_id.
                     # If we have sender_node_id and it's in identities, great.
                     if message.sender_node_id and message.sender_node_id in self._node_identities:
-                        self._send_packet(message.sender_node_id, payload)
+                        self._send_payload(message.sender_node_id, payload)
                     elif message.sender_hash in self._destination_to_node:
                         node_id = self._destination_to_node[message.sender_hash]
-                        self._send_packet(node_id, payload)
+                        self._send_payload(node_id, payload)
                     else:
                         # We have the hash but no node_id mapping.
                         # _send_packet requires node_id to lookup identity.
@@ -808,25 +911,7 @@ class NetworkTransport(Transport):
             )
             return
         if isinstance(message, ContextUpdate):
-            for worker in self._workers.values():
-                if worker.store:
-                    tags = ["context_update"]
-                    payload = self._extract_global_context_payload(message.content)
-                    if payload:
-                        context_id_value = payload.get("context_id")
-                        if context_id_value:
-                            tags.append("global_context")
-                            tags.append(f"context_id:{context_id_value}")
-                        version_value = payload.get("version")
-                        if version_value is not None:
-                            tags.append(f"context_version:{version_value}")
-                    worker.store.add_memory(message.content, message.source_node, tags=tags)
-            self._record_completion_from_content(message.content, message.source_node, message.context_id)
-            self.emit_activity(
-                "context_update",
-                node_id=message.source_node,
-                payload={"context_id": message.context_id},
-            )
+            self._handle_context_update(message.content, message.source_node, message.context_id)
             return
 
     def _ensure_path(self, node_id: str, wait_seconds: float = 2.0) -> bool:
@@ -888,6 +973,32 @@ class NetworkTransport(Transport):
         except Exception as e:
              print(f"[Transport] Packet send failed: {e}")
              return False
+
+    def _send_payload(self, node_id: str, payload: bytes) -> bool:
+        link = self._get_or_create_link(node_id)
+        if link:
+            deadline = time.monotonic() + 2.0
+            while link.status == RNS.Link.PENDING and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if link.status == RNS.Link.ACTIVE:
+                if len(payload) > link.MDU:
+                    try:
+                        RNS.Resource(payload, link)
+                        return True
+                    except Exception as e:
+                        print(f"[Transport] Resource send failed: {e}")
+                        return False
+                try:
+                    packet = RNS.Packet(link, payload)
+                    packet.send()
+                    return packet.sent
+                except Exception as e:
+                    print(f"[Transport] Packet send failed: {e}")
+                    return False
+        if len(payload) > 465:
+            print(f"[Transport] Payload too large without link ({len(payload)} bytes)")
+            return False
+        return self._send_packet(node_id, payload)
 
 
 class _AnnounceHandler:
