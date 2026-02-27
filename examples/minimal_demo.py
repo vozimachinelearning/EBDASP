@@ -94,8 +94,14 @@ class ConsoleRedirector:
         # Process complete lines
         while '\n' in self.buffer:
             line, _, self.buffer = self.buffer.partition('\n')
-            # Use call_from_thread to ensure thread safety when writing from other threads
-            self.rich_log.app.call_from_thread(self.rich_log.write, line)
+            app = self.rich_log.app
+            if app and getattr(app, "_thread_id", None) == threading.get_ident():
+                self.rich_log.write(line)
+            else:
+                try:
+                    app.call_from_thread(self.rich_log.write, line)
+                except RuntimeError:
+                    self.rich_log.write(line)
 
     def flush(self) -> None:
         if self.log_file_handle:
@@ -105,7 +111,14 @@ class ConsoleRedirector:
                 pass
                 
         if self.buffer:
-            self.rich_log.app.call_from_thread(self.rich_log.write, self.buffer)
+            app = self.rich_log.app
+            if app and getattr(app, "_thread_id", None) == threading.get_ident():
+                self.rich_log.write(self.buffer)
+            else:
+                try:
+                    app.call_from_thread(self.rich_log.write, self.buffer)
+                except RuntimeError:
+                    self.rich_log.write(self.buffer)
             self.buffer = ""
     
     def close(self) -> None:
