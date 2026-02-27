@@ -42,6 +42,7 @@ class Orchestrator:
             raise RuntimeError("LLMEngine is required for task decomposition.")
 
         print(f"Starting decomposition for: {question}")
+        self.transport.emit_activity("pipeline_start", node_id=self.transport.node_id, payload={"question": question})
         
         current_context = question
         memory_hits = self.coordinator.store.query_memory(question, limit=5)
@@ -52,11 +53,21 @@ class Orchestrator:
         for cycle in range(max_cycles):
             print(f"--- Cycle {cycle + 1}/{max_cycles} ---")
             
+            self.transport.emit_activity(
+                "pipeline_cycle_start",
+                node_id=self.transport.node_id,
+                payload={"cycle": cycle + 1, "max_cycles": max_cycles},
+            )
             # 1. Decompose
             decomposition_input = f"{current_context}\n\nMemory:\n{memory_context}"
             sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input)
             if not sub_tasks_desc:
                 print("No sub-tasks generated. Stopping cycles.")
+                self.transport.emit_activity(
+                    "pipeline_no_tasks",
+                    node_id=self.transport.node_id,
+                    payload={"cycle": cycle + 1},
+                )
                 break
                 
             # 2. Assign Roles
@@ -76,6 +87,11 @@ class Orchestrator:
                 tasks.append(task)
                 task_order[task.task_id] = len(tasks) - 1
                 print(f"  - Task: {task.description[:50]}... (Role: {task.role})")
+            self.transport.emit_activity(
+                "pipeline_tasks_created",
+                node_id=self.transport.node_id,
+                payload={"cycle": cycle + 1, "tasks_count": len(tasks)},
+            )
             
             # 4. Distribute to Workers
             available_nodes = self.transport.available_nodes()
@@ -106,6 +122,7 @@ class Orchestrator:
             cycle_results: List[TaskResult] = []
             threads = []
             results_lock = threading.Lock()
+            progress = {"done": 0, "total": len(tasks)}
 
             def dispatch(node_id: str, assignment_msg: TaskAssignment):
                 try:
@@ -122,9 +139,35 @@ class Orchestrator:
                         assignment_msg.assignment_id = str(uuid.uuid4())
                         assignment_msg.timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                         try:
+                            self.transport.emit_activity(
+                                "task_dispatched",
+                                node_id=node_id,
+                                payload={
+                                    "task_id": assignment_msg.task.task_id,
+                                    "assignment_id": assignment_msg.assignment_id,
+                                    "role": assignment_msg.task.role,
+                                    "attempt": attempt,
+                                },
+                            )
                             result = self.transport.send_task(node_id, assignment_msg)
                             with results_lock:
                                 cycle_results.append(result)
+                                progress["done"] += 1
+                                done = progress["done"]
+                                total = progress["total"]
+                            self.transport.emit_activity(
+                                "task_completed",
+                                node_id=node_id,
+                                payload={
+                                    "task_id": result.task_id,
+                                    "assignment_id": result.assignment_id,
+                                    "result_id": result.result_id,
+                                    "completed": result.completed,
+                                    "result": result.result,
+                                    "done": done,
+                                    "total": total,
+                                },
+                            )
                             print(f"Received result from {node_id}: {result.result[:100]}...")
                             return
                         except Exception as attempt_error:
@@ -134,6 +177,14 @@ class Orchestrator:
                     if last_error:
                         raise last_error
                 except Exception as e:
+                    self.transport.emit_activity(
+                        "task_error",
+                        node_id=node_id,
+                        payload={
+                            "task_id": assignment_msg.task.task_id,
+                            "error": str(e),
+                        },
+                    )
                     print(f"Error executing task on {node_id}: {e}")
 
             if distribution_pool:
@@ -157,17 +208,32 @@ class Orchestrator:
                     threads.append(t)
                     t.start()
                     
+                self.transport.emit_activity(
+                    "pipeline_waiting",
+                    node_id=self.transport.node_id,
+                    payload={"total": len(tasks)},
+                )
                 print(f"[Orchestrator] Waiting for {len(tasks)} tasks to complete...")
                 for t in threads:
                     t.join()
             else:
                  print("No available workers to distribute tasks to.")
+                 self.transport.emit_activity(
+                     "pipeline_no_workers",
+                     node_id=self.transport.node_id,
+                     payload={"cycle": cycle + 1},
+                 )
                  break
             
             all_results.extend(cycle_results)
             
             # 5. Consolidate & Check for Next Cycle
             print(f"[Orchestrator] All tasks completed. Synthesizing results from {len(cycle_results)} tasks...")
+            self.transport.emit_activity(
+                "pipeline_results_ready",
+                node_id=self.transport.node_id,
+                payload={"results_count": len(cycle_results)},
+            )
             ordered_results = sorted(cycle_results, key=lambda r: task_order.get(r.task_id, 1_000_000))
             parts = []
             for result in ordered_results:
@@ -225,6 +291,11 @@ Compose a coherent final response from the parts. Preserve correct order and rem
 """
                 final_answer = self.llm_engine.generate(assembly_prompt)
                 print(f"Task completed. Final Answer: {final_answer[:200]}...")
+                self.transport.emit_activity(
+                    "pipeline_final",
+                    node_id=self.transport.node_id,
+                    payload={"final_answer": final_answer},
+                )
                 self.coordinator.store.add_memory(
                     text=f"Q: {question}\nA: {final_answer}",
                     source=self.transport.node_id,
@@ -243,6 +314,11 @@ Compose a coherent final response from the parts. Preserve correct order and rem
             else:
                 current_context = content
                 print(f"Continuing to next cycle with context: {current_context[:50]}...")
+                self.transport.emit_activity(
+                    "pipeline_continue",
+                    node_id=self.transport.node_id,
+                    payload={"cycle": cycle + 1, "context": current_context},
+                )
                 self.coordinator.store.add_memory(
                     text=f"Cycle {cycle + 1} context: {current_context}",
                     source=self.transport.node_id,

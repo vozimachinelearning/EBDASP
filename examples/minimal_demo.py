@@ -266,13 +266,82 @@ class SwarmTUI(App):
         self.call_from_thread(self._append_activity, event)
 
     def _append_activity(self, event: dict) -> None:
-        if event.get("event") != "message_received":
-            return
-        timestamp = time.strftime("%H:%M:%S", time.localtime(event["timestamp"]))
+        event_name = event.get("event")
         payload = event.get("payload", {})
-        sender = payload.get("sender") or event.get("node_id") or "swarm"
-        text = payload.get("text", "")
-        self._write_activity(f"{sender}: {text}")
+        node_id = event.get("node_id") or payload.get("node_id") or "swarm"
+        if event_name == "message_received":
+            sender = payload.get("sender") or node_id
+            text = payload.get("text", "")
+            self._write_activity(f"{sender}: {text}")
+            return
+        if event_name == "pipeline_start":
+            self._write_activity_block("Pipeline Start", [f"node={node_id}", f"question={payload.get('question','')}"])
+            return
+        if event_name == "pipeline_cycle_start":
+            self._write_activity_block(
+                "Pipeline Cycle",
+                [f"node={node_id}", f"cycle={payload.get('cycle')}", f"max_cycles={payload.get('max_cycles')}"],
+            )
+            return
+        if event_name == "pipeline_tasks_created":
+            self._write_activity_block(
+                "Subtasks Created",
+                [f"node={node_id}", f"count={payload.get('tasks_count')}"],
+            )
+            return
+        if event_name == "task_dispatched":
+            self._write_activity_block(
+                "Task Dispatched",
+                [
+                    f"node={node_id}",
+                    f"task_id={payload.get('task_id','')}",
+                    f"assignment_id={payload.get('assignment_id','')}",
+                    f"role={payload.get('role','')}",
+                    f"attempt={payload.get('attempt','')}",
+                ],
+            )
+            return
+        if event_name == "task_completed":
+            self._write_activity_block(
+                "Task Completed",
+                [
+                    f"node={node_id}",
+                    f"task_id={payload.get('task_id','')}",
+                    f"result_id={payload.get('result_id','')}",
+                    f"completed={payload.get('completed', True)}",
+                    f"progress={payload.get('done',0)}/{payload.get('total',0)}",
+                    "response:",
+                    f"{payload.get('result','')}",
+                ],
+            )
+            return
+        if event_name == "task_error":
+            self._write_activity_block(
+                "Task Error",
+                [f"node={node_id}", f"task_id={payload.get('task_id','')}", f"error={payload.get('error','')}"],
+            )
+            return
+        if event_name == "pipeline_waiting":
+            self._write_activity_block("Waiting For Tasks", [f"node={node_id}", f"total={payload.get('total',0)}"])
+            return
+        if event_name == "pipeline_results_ready":
+            self._write_activity_block("Results Ready", [f"node={node_id}", f"count={payload.get('results_count',0)}"])
+            return
+        if event_name == "pipeline_final":
+            self._write_activity_block("Final Answer", ["response:", f"{payload.get('final_answer','')}"])
+            return
+        if event_name == "pipeline_no_tasks":
+            self._write_activity_block("No Tasks Generated", [f"node={node_id}"])
+            return
+        if event_name == "pipeline_no_workers":
+            self._write_activity_block("No Workers Available", [f"node={node_id}"])
+            return
+        if event_name == "pipeline_continue":
+            self._write_activity_block(
+                "Pipeline Continue",
+                [f"node={node_id}", f"cycle={payload.get('cycle')}", f"context={payload.get('context','')}"],
+            )
+            return
 
     def refresh_status(self) -> None:
         self.interfaces_table.clear()
