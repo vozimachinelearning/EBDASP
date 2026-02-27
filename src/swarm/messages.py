@@ -154,6 +154,9 @@ class TaskAssignment(Message):
     timestamp: str
     sender_node_id: Optional[str] = None
     sender_hash: Optional[str] = None
+    global_goal: Optional[str] = None
+    global_context: Optional[str] = None
+    memory_context: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -164,6 +167,9 @@ class TaskAssignment(Message):
             "timestamp": self.timestamp,
             "sender_node_id": self.sender_node_id,
             "sender_hash": self.sender_hash,
+            "global_goal": self.global_goal,
+            "global_context": self.global_context,
+            "memory_context": self.memory_context,
         }
 
 
@@ -296,6 +302,9 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             timestamp=data["timestamp"],
             sender_node_id=data.get("sender_node_id"),
             sender_hash=data.get("sender_hash"),
+            global_goal=data.get("global_goal"),
+            global_context=data.get("global_context"),
+            memory_context=data.get("memory_context"),
         )
     if message_type == "task_result":
         return TaskResult(

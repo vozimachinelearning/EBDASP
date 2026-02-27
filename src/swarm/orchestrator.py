@@ -45,8 +45,6 @@ class Orchestrator:
         self.transport.emit_activity("pipeline_start", node_id=self.transport.node_id, payload={"question": question})
         
         current_context = question
-        memory_hits = self.coordinator.store.query_memory(question, limit=5)
-        memory_context = "\n".join([item.get("text", "") for item in memory_hits])
         all_results = []
         final_answer = ""
         
@@ -59,6 +57,8 @@ class Orchestrator:
                 payload={"cycle": cycle + 1, "max_cycles": max_cycles},
             )
             # 1. Decompose
+            memory_hits = self.coordinator.store.query_memory(f"{question}\n{current_context}", limit=5)
+            memory_context = "\n".join([item.get("text", "") for item in memory_hits])
             decomposition_input = f"{current_context}\n\nMemory:\n{memory_context}"
             sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input)
             if not sub_tasks_desc:
@@ -201,7 +201,10 @@ class Orchestrator:
                         assigned_to_node=node_id,
                         timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                         sender_node_id=self.transport.node_id,
-                        sender_hash=getattr(self.transport, '_destination_hash_hex', None)
+                        sender_hash=getattr(self.transport, '_destination_hash_hex', None),
+                        global_goal=question,
+                        global_context=current_context,
+                        memory_context=memory_context,
                     )
                     
                     t = threading.Thread(target=dispatch, args=(node_id, assignment_msg))

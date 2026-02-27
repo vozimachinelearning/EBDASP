@@ -43,7 +43,19 @@ class Worker:
                 memory_context = "\n".join([m.get("text", "") for m in memories])
         if self.llm_engine:
             print(f"[Worker:{self.transport.node_id}] Executing with LLM...")
-            prompt = f"Role: {task.role}\nTask: {task.description}\n\nMemory:\n{memory_context}\n\nPlease execute this task and provide the result."
+            global_goal = assignment.global_goal or ""
+            global_context = assignment.global_context or ""
+            shared_memory = "\n".join(
+                [text for text in [assignment.memory_context, memory_context] if text]
+            )
+            prompt = (
+                f"Global Goal: {global_goal}\n"
+                f"Global Context: {global_context}\n"
+                f"Role: {task.role}\n"
+                f"Subtask: {task.description}\n\n"
+                f"Memory:\n{shared_memory}\n\n"
+                "Please execute this subtask so it advances the Global Goal and provide the result."
+            )
             # Assuming generate is blocking for now
             result_text = self.llm_engine.generate(prompt)
             print(f"[Worker:{self.transport.node_id}] LLM Generation complete ({len(result_text)} chars).")
