@@ -159,8 +159,11 @@ Return a concise updated context that preserves the goal and removes unrelated c
                  break
             
             remote_nodes = [node_id for node_id in available_nodes if node_id not in local_workers]
-            if remote_nodes:
-                distribution_pool = remote_nodes
+            reachable_remote = remote_nodes
+            if hasattr(self.transport, "filter_reachable_nodes"):
+                reachable_remote = self.transport.filter_reachable_nodes(remote_nodes)
+            if reachable_remote:
+                distribution_pool = reachable_remote
             else:
                 distribution_pool = local_workers if local_workers else available_nodes
 

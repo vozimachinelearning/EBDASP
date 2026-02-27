@@ -427,6 +427,7 @@ class NetworkTransport(Transport):
         self._pending_events: Dict[str, threading.Event] = {}
         self._pending_lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._last_no_interface_log = 0.0
         if rns_config_dir:
             RNS.Reticulum(rns_config_dir)
         else:
@@ -519,6 +520,8 @@ class NetworkTransport(Transport):
 
     def heartbeat(self, node_id: str) -> None:
         super().heartbeat(node_id)
+        if not self._has_outbound_interface():
+            return
         heartbeat = Heartbeat(
             node_id=node_id,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
@@ -572,8 +575,6 @@ class NetworkTransport(Transport):
             raise ValueError(f"Unknown remote node: {node_id}")
         if not self._has_outbound_interface():
             raise ConnectionError("No outbound interfaces available for remote task delivery")
-        if not self._ensure_path(node_id, wait_seconds=0):
-            raise ConnectionError(f"No path to {node_id}")
             
         print(f"[NetworkTransport] Remote delivery for Task {assignment.task.task_id} to {node_id} (via Reticulum)")
         
@@ -585,14 +586,9 @@ class NetworkTransport(Transport):
             
         payload = self.protocol.encode_binary(assignment)
         
-        link = self._get_or_create_link(node_id)
+        link = self._ensure_link_active(node_id, wait_seconds=2.0, attempts=3)
         if not link:
-             raise ValueError(f"Cannot establish link to {node_id}")
-        
-        while link.status != RNS.Link.ACTIVE:
-             if link.status == RNS.Link.CLOSED:
-                  raise ConnectionError(f"Link to {node_id} failed")
-             time.sleep(0.1)
+            raise ConnectionError(f"Link to {node_id} failed")
 
         event = threading.Event()
         with self._pending_lock:
@@ -600,25 +596,23 @@ class NetworkTransport(Transport):
             
         print(f"[Transport] Sending Task {assignment.task.task_id} to {node_id} ({len(payload)} bytes)...")
         if len(payload) > link.MDU:
-             print(f"[Transport] Using Resource for large payload ({len(payload)} bytes)")
-             try:
-                 resource = RNS.Resource(payload, link)
-                 # Wait for resource to start transferring? 
-                 # Resource is background. We just wait for response.
-             except Exception as e:
-                 print(f"[Transport] Resource creation failed: {e}")
-                 with self._pending_lock:
-                     self._pending_events.pop(assignment.assignment_id, None)
-                 raise
+            print(f"[Transport] Using Resource for large payload ({len(payload)} bytes)")
+            try:
+                RNS.Resource(payload, link)
+            except Exception as e:
+                print(f"[Transport] Resource creation failed: {e}")
+                with self._pending_lock:
+                    self._pending_events.pop(assignment.assignment_id, None)
+                raise
         else:
-             packet = RNS.Packet(link, payload)
-             try:
-                 packet.send()
-             except Exception as e:
-                 print(f"[Transport] Packet send failed: {e}")
-                 with self._pending_lock:
-                     self._pending_events.pop(assignment.assignment_id, None)
-                 raise
+            packet = RNS.Packet(link, payload)
+            try:
+                packet.send()
+            except Exception as e:
+                print(f"[Transport] Packet send failed: {e}")
+                with self._pending_lock:
+                    self._pending_events.pop(assignment.assignment_id, None)
+                raise
 
         print(f"[NetworkTransport] Waiting for response for Task {assignment.task.task_id}...")
         event.wait()
@@ -738,6 +732,24 @@ class NetworkTransport(Transport):
         self._links[node_id] = link
         return link
 
+    def _ensure_link_active(self, node_id: str, wait_seconds: float = 2.0, attempts: int = 3) -> Optional[RNS.Link]:
+        if not self._ensure_path(node_id, wait_seconds=wait_seconds):
+            return None
+        for attempt in range(max(1, attempts)):
+            link = self._get_or_create_link(node_id)
+            if not link:
+                time.sleep(min(0.2, 0.05 * (attempt + 1)))
+                continue
+            deadline = time.monotonic() + wait_seconds
+            while link.status == RNS.Link.PENDING and time.monotonic() < deadline:
+                time.sleep(0.05)
+            if link.status == RNS.Link.ACTIVE:
+                return link
+            if link.status == RNS.Link.CLOSED:
+                self._links.pop(node_id, None)
+            time.sleep(min(0.5, 0.1 * (attempt + 1)))
+        return None
+
     def _on_link_established(self, link: RNS.Link) -> None:
         link.set_link_closed_callback(self._on_link_closed)
         link.set_packet_callback(self._on_link_packet)
@@ -846,40 +858,33 @@ class NetworkTransport(Transport):
                 # Send result back
                 payload = self.protocol.encode_binary(result)
                 
-                # Try to send via Link first
                 target_node_id = message.sender_node_id
                 if target_node_id:
-                     link = self._get_or_create_link(target_node_id)
-                     if link:
-                         print(f"[Transport] Sending TaskResult to {target_node_id} via Link ({len(payload)} bytes)")
-                         if len(payload) > link.MDU:
-                             try:
-                                 RNS.Resource(payload, link)
-                             except Exception as e:
-                                 print(f"[Transport] Failed to send result resource: {e}")
-                         else:
-                             try:
-                                 RNS.Packet(link, payload).send()
-                             except Exception as e:
-                                 print(f"[Transport] Failed to send result packet: {e}")
-                         return
+                    link = self._ensure_link_active(target_node_id, wait_seconds=1.5, attempts=2)
+                    if link:
+                        print(f"[Transport] Sending TaskResult to {target_node_id} via Link ({len(payload)} bytes)")
+                        if len(payload) > link.MDU:
+                            try:
+                                RNS.Resource(payload, link)
+                                return
+                            except Exception as e:
+                                print(f"[Transport] Failed to send result resource: {e}")
+                        else:
+                            try:
+                                RNS.Packet(link, payload).send()
+                                return
+                            except Exception as e:
+                                print(f"[Transport] Failed to send result packet: {e}")
+                    if self._send_payload(target_node_id, payload):
+                        return
 
-                # Fallback to connectionless
-                # Determine destination
                 if message.sender_hash:
-                    # We can send to hash if we have a mapping or use raw RNS if possible.
-                    # self._send_packet uses node_id.
-                    # If we have sender_node_id and it's in identities, great.
                     if message.sender_node_id and message.sender_node_id in self._node_identities:
                         self._send_payload(message.sender_node_id, payload)
                     elif message.sender_hash in self._destination_to_node:
                         node_id = self._destination_to_node[message.sender_hash]
                         self._send_payload(node_id, payload)
                     else:
-                        # We have the hash but no node_id mapping.
-                        # _send_packet requires node_id to lookup identity.
-                        # This is a limitation of current implementation.
-                        # We'll log error or try best effort.
                         pass
             return
 
@@ -936,6 +941,12 @@ class NetworkTransport(Transport):
         return False
 
     def _send_packet(self, node_id: str, payload: bytes) -> bool:
+        if not self._has_outbound_interface():
+            now = time.monotonic()
+            if now - self._last_no_interface_log > 5.0:
+                print("[Transport] No outbound interfaces available")
+                self._last_no_interface_log = now
+            return False
         identity = self._node_identities.get(node_id)
         if identity is None:
             print(f"[Transport] Error: No identity for {node_id}")
@@ -975,26 +986,28 @@ class NetworkTransport(Transport):
              return False
 
     def _send_payload(self, node_id: str, payload: bytes) -> bool:
-        link = self._get_or_create_link(node_id)
+        if not self._has_outbound_interface():
+            now = time.monotonic()
+            if now - self._last_no_interface_log > 5.0:
+                print("[Transport] No outbound interfaces available")
+                self._last_no_interface_log = now
+            return False
+        link = self._ensure_link_active(node_id, wait_seconds=1.5, attempts=2)
         if link:
-            deadline = time.monotonic() + 2.0
-            while link.status == RNS.Link.PENDING and time.monotonic() < deadline:
-                time.sleep(0.05)
-            if link.status == RNS.Link.ACTIVE:
-                if len(payload) > link.MDU:
-                    try:
-                        RNS.Resource(payload, link)
-                        return True
-                    except Exception as e:
-                        print(f"[Transport] Resource send failed: {e}")
-                        return False
+            if len(payload) > link.MDU:
                 try:
-                    packet = RNS.Packet(link, payload)
-                    packet.send()
-                    return packet.sent
+                    RNS.Resource(payload, link)
+                    return True
                 except Exception as e:
-                    print(f"[Transport] Packet send failed: {e}")
+                    print(f"[Transport] Resource send failed: {e}")
                     return False
+            try:
+                packet = RNS.Packet(link, payload)
+                packet.send()
+                return packet.sent
+            except Exception as e:
+                print(f"[Transport] Packet send failed: {e}")
+                return False
         if len(payload) > 465:
             print(f"[Transport] Payload too large without link ({len(payload)} bytes)")
             return False
