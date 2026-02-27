@@ -135,6 +135,9 @@ class SwarmTUI(App):
     #interfaces {
         height: 1fr;
     }
+    #health {
+        height: 1fr;
+    }
     #nodes {
         height: 1fr;
     }
@@ -169,6 +172,8 @@ class SwarmTUI(App):
         yield Header()
         with Horizontal(id="body"):
             with Vertical(id="left"):
+                yield Static("Health", id="health_label")
+                yield DataTable(id="health")
                 yield Static("Interfaces", id="interfaces_label")
                 yield DataTable(id="interfaces")
                 yield Static("Connections", id="nodes_label")
@@ -183,6 +188,7 @@ class SwarmTUI(App):
 
     def on_mount(self) -> None:
         self.interfaces_table = self.query_one("#interfaces", DataTable)
+        self.health_table = self.query_one("#health", DataTable)
         self.nodes_table = self.query_one("#nodes", DataTable)
         self.activity_log = self.query_one("#activity", RichLog)
         self.console_log = self.query_one("#console_log", RichLog)
@@ -211,6 +217,7 @@ class SwarmTUI(App):
             self._activity_log_handle = None
 
         self.interfaces_table.add_columns("Name", "Type", "IN", "OUT", "Online", "Bitrate")
+        self.health_table.add_columns("Metric", "Value")
         self.nodes_table.add_columns("Node", "Domains", "Collections", "Last Seen (s)")
         self.transport.subscribe_activity(self._on_activity)
         self.refresh_status()
@@ -344,8 +351,32 @@ class SwarmTUI(App):
             return
 
     def refresh_status(self) -> None:
+        self.health_table.clear()
         self.interfaces_table.clear()
         if self.network_enabled and isinstance(self.transport, NetworkTransport):
+            interfaces = self.transport.interface_status()
+            out_total = sum(1 for iface in interfaces if iface.get("out"))
+            out_online = sum(1 for iface in interfaces if iface.get("out") and iface.get("online"))
+            self.health_table.add_row("Outbound IF", f"{out_online}/{out_total}")
+            nodes = self.transport.live_status()
+            reachable = 0
+            total = len(nodes)
+            for item in nodes:
+                node_id = item["node_id"]
+                health = self.transport.get_node_health(node_id)
+                status = "ok"
+                if not health.get("has_outbound_interface"):
+                    status = "no outbound"
+                elif not health.get("has_identity"):
+                    status = "no identity"
+                elif health.get("hash_match") is False:
+                    status = "hash mismatch"
+                elif not health.get("has_path"):
+                    status = "no path"
+                else:
+                    reachable += 1
+                self.health_table.add_row(node_id, status)
+            self.health_table.add_row("Reachable", f"{reachable}/{total}")
             for interface in self.transport.interface_status():
                 self.interfaces_table.add_row(
                     interface["name"],
@@ -356,6 +387,8 @@ class SwarmTUI(App):
                     str(interface["bitrate"]),
                 )
         else:
+            self.health_table.add_row("Outbound IF", "n/a")
+            self.health_table.add_row("Reachable", "local")
             self.interfaces_table.add_row("local", "in-memory", "True", "True", "True", "0")
         self.nodes_table.clear()
         for item in self.transport.live_status():

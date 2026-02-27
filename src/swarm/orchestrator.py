@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional, TYPE_CHECKING
+import json
 import uuid
 import time
 import threading
@@ -106,7 +107,7 @@ class Orchestrator:
             for worker_id in local_workers:
                 if worker_id not in available_nodes:
                     available_nodes.append(worker_id)
-            
+
             if not available_nodes:
                  print("Critical: No workers (local or remote) available to process tasks.")
                  break
@@ -130,13 +131,9 @@ class Orchestrator:
                     assignment_msg.sender_node_id = self.transport.node_id
                     assignment_msg.sender_hash = sender_hash
 
-                    is_local = node_id in local_workers
-                    max_attempts = 1 if is_local else 3
                     attempt = 0
-                    last_error: Optional[Exception] = None
-                    while attempt < max_attempts:
+                    while True:
                         attempt += 1
-                        assignment_msg.assignment_id = str(uuid.uuid4())
                         assignment_msg.timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
                         try:
                             self.transport.emit_activity(
@@ -169,13 +166,20 @@ class Orchestrator:
                                 },
                             )
                             print(f"Received result from {node_id}: {result.result[:100]}...")
+                            self._broadcast_completion(result, done, total)
                             return
                         except Exception as attempt_error:
-                            last_error = attempt_error
-                            if attempt < max_attempts:
-                                time.sleep(2.0 * attempt)
-                    if last_error:
-                        raise last_error
+                            self.transport.emit_activity(
+                                "task_retry",
+                                node_id=node_id,
+                                payload={
+                                    "task_id": assignment_msg.task.task_id,
+                                    "assignment_id": assignment_msg.assignment_id,
+                                    "attempt": attempt,
+                                    "error": str(attempt_error),
+                                },
+                            )
+                            time.sleep(min(30.0, 2.0 * attempt))
                 except Exception as e:
                     self.transport.emit_activity(
                         "task_error",
@@ -338,3 +342,57 @@ Compose a coherent final response from the parts. Preserve correct order and rem
             "parts": [item for item in parts] if 'parts' in locals() else [],
             "final_answer": final_answer
         }
+
+    def _broadcast_completion(self, result: TaskResult, done: int, total: int) -> None:
+        payload = {
+            "type": "task_completion",
+            "task_id": result.task_id,
+            "assignment_id": result.assignment_id,
+            "result_id": result.result_id,
+            "node_id": result.node_id,
+            "completed": result.completed,
+            "completion_status": "completed" if result.completed else "incomplete",
+            "done": done,
+            "total": total,
+            "timestamp": result.timestamp,
+        }
+        self.transport.record_completion(payload)
+        content = json.dumps(payload, ensure_ascii=False)
+        context_id = str(uuid.uuid4())
+        node_ids = self.transport.available_nodes()
+        for worker_id in list(self.transport._workers.keys()):
+            if worker_id not in node_ids:
+                node_ids.append(worker_id)
+
+        def send_with_retry(node_id: str) -> None:
+            attempt = 0
+            while True:
+                attempt += 1
+                ok = self.transport.send_context_update(node_id, content, context_id=context_id)
+                if ok:
+                    self.transport.emit_activity(
+                        "completion_shared",
+                        node_id=node_id,
+                        payload={
+                            "task_id": result.task_id,
+                            "assignment_id": result.assignment_id,
+                            "result_id": result.result_id,
+                            "attempt": attempt,
+                        },
+                    )
+                    return
+                self.transport.emit_activity(
+                    "completion_retry",
+                    node_id=node_id,
+                    payload={
+                        "task_id": result.task_id,
+                        "assignment_id": result.assignment_id,
+                        "result_id": result.result_id,
+                        "attempt": attempt,
+                    },
+                )
+                time.sleep(min(30.0, 2.0 * attempt))
+
+        for node_id in node_ids:
+            t = threading.Thread(target=send_with_retry, args=(node_id,), daemon=True)
+            t.start()

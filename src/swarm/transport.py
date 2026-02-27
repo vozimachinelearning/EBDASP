@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import json
 import uuid
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -35,6 +36,7 @@ class Transport:
         self._last_seen: Dict[str, float] = {}
         self._activity: List[Dict[str, Any]] = []
         self._activity_callbacks: List[Callable[[Dict[str, Any]], None]] = []
+        self._completion_ledger: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
 
     def register_worker(self, node_id: str, worker: Worker) -> None:
@@ -202,8 +204,41 @@ class Transport:
             for worker in self._workers.values():
                 if worker.store:
                     worker.store.add_memory(update.content, update.source_node, tags=["context_update"])
+            self._record_completion_from_content(update.content, update.source_node, update.context_id)
             return True
         return False
+
+    def get_completion_ledger(self) -> Dict[str, Dict[str, Any]]:
+        with self._lock:
+            return dict(self._completion_ledger)
+
+    def record_completion(self, payload: Dict[str, Any]) -> None:
+        key = payload.get("assignment_id") or payload.get("result_id") or payload.get("task_id")
+        if not key:
+            return
+        with self._lock:
+            self._completion_ledger[key] = payload
+
+    def _record_completion_from_content(self, content: str, source_node: str, context_id: str) -> None:
+        try:
+            payload = json.loads(content)
+        except Exception:
+            return
+        if not isinstance(payload, dict):
+            return
+        if payload.get("type") != "task_completion":
+            return
+        self.record_completion(payload)
+        self.emit_activity(
+            "completion_ledger_update",
+            node_id=source_node,
+            payload={
+                "task_id": payload.get("task_id"),
+                "assignment_id": payload.get("assignment_id"),
+                "result_id": payload.get("result_id"),
+                "context_id": context_id,
+            },
+        )
 
     def _prune_stale(self) -> None:
         now = self._time_provider()
@@ -273,6 +308,58 @@ class NetworkTransport(Transport):
         self._destination_hash_hex = self._destination_hash.hex()
         threading.Thread(target=self._announce_loop, daemon=True).start()
 
+    def _has_outbound_interface(self) -> bool:
+        for interface in list(RNS.Transport.interfaces):
+            if getattr(interface, "OUT", False) and getattr(interface, "online", False):
+                return True
+        return False
+
+    def is_node_reachable(self, node_id: str) -> bool:
+        if node_id in self._workers:
+            return True
+        if not self._has_outbound_interface():
+            return False
+        if node_id not in self._node_identities:
+            return False
+        return self._ensure_path(node_id, wait_seconds=0)
+
+    def filter_reachable_nodes(self, node_ids: List[str]) -> List[str]:
+        return [node_id for node_id in node_ids if self.is_node_reachable(node_id)]
+
+    def get_node_health(self, node_id: str) -> Dict[str, Any]:
+        stored_hash = self._node_destinations.get(node_id)
+        identity = self._node_identities.get(node_id)
+        actual_hash = None
+        hash_match = None
+        if identity is not None:
+            destination = RNS.Destination(
+                identity,
+                RNS.Destination.OUT,
+                RNS.Destination.SINGLE,
+                self._app_name,
+                self._aspect,
+            )
+            actual_hash = destination.hash.hex()
+            if stored_hash:
+                hash_match = stored_hash == actual_hash
+        has_path = False
+        next_hop = None
+        if stored_hash:
+            destination_hash_bytes = bytes.fromhex(stored_hash)
+            if RNS.Transport.has_path(destination_hash_bytes):
+                next_hop = RNS.Transport.next_hop_interface(destination_hash_bytes)
+                has_path = next_hop is not None and getattr(next_hop, "OUT", False)
+        return {
+            "node_id": node_id,
+            "has_identity": identity is not None,
+            "has_outbound_interface": self._has_outbound_interface(),
+            "stored_hash": stored_hash,
+            "actual_hash": actual_hash,
+            "hash_match": hash_match,
+            "has_path": has_path,
+            "next_hop": getattr(next_hop, "name", None) if next_hop else None,
+        }
+
     def announce(self, announcement: AnnounceCapabilities) -> None:
         if not announcement.destination_hash:
             announcement = AnnounceCapabilities(
@@ -341,6 +428,10 @@ class NetworkTransport(Transport):
         
         if node_id not in self._node_identities:
             raise ValueError(f"Unknown remote node: {node_id}")
+        if not self._has_outbound_interface():
+            raise ConnectionError("No outbound interfaces available for remote task delivery")
+        if not self._ensure_path(node_id, wait_seconds=0):
+            raise ConnectionError(f"No path to {node_id}")
             
         print(f"[NetworkTransport] Remote delivery for Task {assignment.task.task_id} to {node_id} (via Reticulum)")
         
@@ -676,6 +767,7 @@ class NetworkTransport(Transport):
             for worker in self._workers.values():
                 if worker.store:
                     worker.store.add_memory(message.content, message.source_node, tags=["context_update"])
+            self._record_completion_from_content(message.content, message.source_node, message.context_id)
             self.emit_activity(
                 "context_update",
                 node_id=message.source_node,
@@ -724,6 +816,8 @@ class NetworkTransport(Transport):
         stored_hash = self._node_destinations.get(node_id)
         if stored_hash and destination.hash.hex() != stored_hash:
             print(f"[Transport] Warning: Destination hash mismatch! {destination.hash.hex()} != {stored_hash}")
+            self._node_destinations[node_id] = destination.hash.hex()
+            self._destination_to_node[destination.hash.hex()] = node_id
             
         print(f"[Transport] Sending packet to {node_id} ({len(payload)} bytes)...")
         if len(payload) > 465: # Approximate safe limit for RNS single packets
