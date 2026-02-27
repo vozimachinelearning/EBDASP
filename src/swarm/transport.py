@@ -34,15 +34,18 @@ class Transport:
         self._last_seen: Dict[str, float] = {}
         self._activity: List[Dict[str, Any]] = []
         self._activity_callbacks: List[Callable[[Dict[str, Any]], None]] = []
+        self._lock = threading.RLock()
 
     def register_worker(self, node_id: str, worker: Worker) -> None:
-        self._workers[node_id] = worker
+        with self._lock:
+            self._workers[node_id] = worker
 
     def announce(self, announcement: AnnounceCapabilities) -> None:
-        if announcement.node_id not in self._announcements:
-            print(f"[Transport] Node discovered: {announcement.node_id}")
-        self._announcements[announcement.node_id] = announcement
-        self._last_seen[announcement.node_id] = self._time_provider()
+        with self._lock:
+            if announcement.node_id not in self._announcements:
+                print(f"[Transport] Node discovered: {announcement.node_id}")
+            self._announcements[announcement.node_id] = announcement
+            self._last_seen[announcement.node_id] = self._time_provider()
         self.emit_activity(
             "announce",
             node_id=announcement.node_id,
@@ -53,12 +56,14 @@ class Transport:
         )
 
     def heartbeat(self, node_id: str) -> None:
-        self._last_seen[node_id] = self._time_provider()
+        with self._lock:
+            self._last_seen[node_id] = self._time_provider()
         self.emit_activity("heartbeat", node_id=node_id, payload={})
 
     def available_nodes(self, domain: Optional[str] = None) -> List[str]:
         self._prune_stale()
-        candidates = list(self._announcements.values())
+        with self._lock:
+            candidates = list(self._announcements.values())
         if domain:
             candidates = [item for item in candidates if domain in item.domains]
         return [item.node_id for item in candidates]
@@ -67,16 +72,17 @@ class Transport:
         self._prune_stale()
         now = self._time_provider()
         results: List[Dict[str, Any]] = []
-        for node_id, announcement in self._announcements.items():
-            last_seen = self._last_seen.get(node_id, 0.0)
-            results.append(
-                {
-                    "node_id": node_id,
-                    "domains": list(announcement.domains),
-                    "collections": list(announcement.collections),
-                    "last_seen_seconds": max(0.0, now - last_seen),
-                }
-            )
+        with self._lock:
+            for node_id, announcement in self._announcements.items():
+                last_seen = self._last_seen.get(node_id, 0.0)
+                results.append(
+                    {
+                        "node_id": node_id,
+                        "domains": list(announcement.domains),
+                        "collections": list(announcement.collections),
+                        "last_seen_seconds": max(0.0, now - last_seen),
+                    }
+                )
         return results
 
     def subscribe_activity(self, callback: Callable[[Dict[str, Any]], None]) -> None:
@@ -187,13 +193,14 @@ class Transport:
     def _prune_stale(self) -> None:
         now = self._time_provider()
         expired: List[str] = []
-        for node_id, last_seen in self._last_seen.items():
-            if now - last_seen > self.heartbeat_ttl_seconds:
-                expired.append(node_id)
-        for node_id in expired:
-            print(f"[Transport] Node lost (stale): {node_id}")
-            self._last_seen.pop(node_id, None)
-            self._announcements.pop(node_id, None)
+        with self._lock:
+            for node_id, last_seen in self._last_seen.items():
+                if now - last_seen > self.heartbeat_ttl_seconds:
+                    expired.append(node_id)
+            for node_id in expired:
+                print(f"[Transport] Node lost (stale): {node_id}")
+                self._last_seen.pop(node_id, None)
+                self._announcements.pop(node_id, None)
 
 
 class NetworkTransport(Transport):
@@ -235,6 +242,10 @@ class NetworkTransport(Transport):
             self._aspect,
         )
         self._destination.set_packet_callback(self._on_packet)
+        self._destination.set_link_established_callback(self._on_link_established)
+        self._links: Dict[str, RNS.Link] = {}
+        self._identity_hash_to_node_id: Dict[bytes, str] = {}
+        
         self._announce_handler = _AnnounceHandler(self)
         RNS.Transport.register_announce_handler(self._announce_handler)
         self._destination_hash = self._destination.hash
@@ -323,18 +334,48 @@ class NetworkTransport(Transport):
             assignment.sender_hash = self._destination_hash_hex
             
         payload = self.protocol.encode_binary(assignment)
+        
+        link = self._get_or_create_link(node_id)
+        if not link:
+             raise ValueError(f"Cannot establish link to {node_id}")
+        
+        # Wait for link
+        deadline = time.time() + 15
+        while link.status != RNS.Link.ACTIVE:
+             if link.status == RNS.Link.CLOSED:
+                  raise ConnectionError(f"Link to {node_id} failed")
+             time.sleep(0.1)
+             if time.time() > deadline:
+                  raise TimeoutError(f"Timeout connecting to {node_id}")
+
         event = threading.Event()
         with self._pending_lock:
             self._pending_events[assignment.assignment_id] = event
             
-        if not self._send_packet(node_id, payload):
-            print(f"[NetworkTransport] Failed to send packet for Task {assignment.task.task_id}")
-            with self._pending_lock:
-                self._pending_events.pop(assignment.assignment_id, None)
-            raise TimeoutError(f"No path to remote node {node_id}")
-            
-        print(f"[NetworkTransport] Packet sent for Task {assignment.task.task_id}. Waiting for response...")
-        if not event.wait(self._response_timeout_seconds):
+        print(f"[Transport] Sending Task {assignment.task.task_id} to {node_id} ({len(payload)} bytes)...")
+        if len(payload) > link.MDU:
+             print(f"[Transport] Using Resource for large payload ({len(payload)} bytes)")
+             try:
+                 resource = RNS.Resource(payload, link)
+                 # Wait for resource to start transferring? 
+                 # Resource is background. We just wait for response.
+             except Exception as e:
+                 print(f"[Transport] Resource creation failed: {e}")
+                 with self._pending_lock:
+                     self._pending_events.pop(assignment.assignment_id, None)
+                 raise
+        else:
+             packet = RNS.Packet(link, payload)
+             try:
+                 packet.send()
+             except Exception as e:
+                 print(f"[Transport] Packet send failed: {e}")
+                 with self._pending_lock:
+                     self._pending_events.pop(assignment.assignment_id, None)
+                 raise
+
+        print(f"[NetworkTransport] Waiting for response for Task {assignment.task.task_id}...")
+        if not event.wait(self._response_timeout_seconds * 2): # Double timeout for large transfers
             print(f"[NetworkTransport] Timeout waiting for Task {assignment.task.task_id} response")
             with self._pending_lock:
                 self._pending_events.pop(assignment.assignment_id, None)
@@ -404,6 +445,80 @@ class NetworkTransport(Transport):
                     self.announce(announcement)
             time.sleep(self._announce_interval_seconds)
 
+    def _get_or_create_link(self, node_id: str) -> Optional[RNS.Link]:
+        if node_id in self._links:
+            link = self._links[node_id]
+            if link.status == RNS.Link.ACTIVE:
+                return link
+            if link.status == RNS.Link.PENDING:
+                return link
+            if link.status == RNS.Link.CLOSED:
+                self._links.pop(node_id, None)
+
+        identity = self._node_identities.get(node_id)
+        if not identity:
+            print(f"[Transport] No identity for {node_id}, cannot create link.")
+            return None
+            
+        destination = RNS.Destination(
+            identity,
+            RNS.Destination.OUT,
+            RNS.Destination.SINGLE,
+            self._app_name,
+            self._aspect
+        )
+        
+        print(f"[Transport] Establishing link to {node_id}...")
+        link = RNS.Link(destination)
+        link.set_link_closed_callback(self._on_link_closed)
+        link.set_packet_callback(self._on_link_packet)
+        link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
+        link.set_resource_concluded_callback(self._on_resource_concluded)
+        
+        self._links[node_id] = link
+        link.start()
+        return link
+
+    def _on_link_established(self, link: RNS.Link) -> None:
+        link.set_link_closed_callback(self._on_link_closed)
+        link.set_packet_callback(self._on_link_packet)
+        link.set_resource_strategy(RNS.Link.ACCEPT_ALL)
+        link.set_resource_concluded_callback(self._on_resource_concluded)
+        
+        remote_identity = link.get_remote_identity()
+        if remote_identity and remote_identity.hash in self._identity_hash_to_node_id:
+             node_id = self._identity_hash_to_node_id[remote_identity.hash]
+             self._links[node_id] = link
+             print(f"[Transport] Link established with {node_id}")
+        else:
+             print(f"[Transport] Link established with unknown identity")
+
+    def _on_link_closed(self, link: RNS.Link) -> None:
+        for node_id, l in list(self._links.items()):
+            if l == link:
+                self._links.pop(node_id, None)
+                print(f"[Transport] Link closed with {node_id}")
+                break
+
+    def _on_link_packet(self, data: bytes, packet: RNS.Packet) -> None:
+        try:
+            message = self.protocol.decode_binary(data)
+        except Exception:
+             try:
+                 message = self.protocol.decode_compact(data)
+             except Exception:
+                 return
+        self._handle_message(message)
+
+    def _on_resource_concluded(self, resource: RNS.Resource) -> None:
+        if resource.status == RNS.Resource.COMPLETE:
+             try:
+                 data = resource.data.read()
+                 message = self.protocol.decode_binary(data)
+                 self._handle_message(message)
+             except Exception as e:
+                 print(f"[Transport] Failed to decode resource data: {e}")
+
     def _on_packet(self, payload: bytes, packet: RNS.Packet) -> None:
         try:
             message = self.protocol.decode_binary(payload)
@@ -412,6 +527,8 @@ class NetworkTransport(Transport):
                 message = self.protocol.decode_compact(payload)
             except Exception:
                 return
+        
+        # Handle Announce specially as it uses packet details
         if isinstance(message, AnnounceCapabilities):
             if not message.destination_hash:
                 message.destination_hash = packet.destination_hash.hex()
@@ -421,6 +538,10 @@ class NetworkTransport(Transport):
                 self._ensure_path(message.node_id, wait_seconds=0)
             super().announce(message)
             return
+
+        self._handle_message(message)
+
+    def _handle_message(self, message: Any) -> None:
         if isinstance(message, Heartbeat):
             self._last_seen[message.node_id] = self._time_provider()
             self.emit_activity("heartbeat", node_id=message.node_id, payload={})
@@ -457,6 +578,25 @@ class NetworkTransport(Transport):
                 # Send result back
                 payload = self.protocol.encode_binary(result)
                 
+                # Try to send via Link first
+                target_node_id = message.sender_node_id
+                if target_node_id:
+                     link = self._get_or_create_link(target_node_id)
+                     if link:
+                         print(f"[Transport] Sending TaskResult to {target_node_id} via Link ({len(payload)} bytes)")
+                         if len(payload) > link.MDU:
+                             try:
+                                 RNS.Resource(payload, link)
+                             except Exception as e:
+                                 print(f"[Transport] Failed to send result resource: {e}")
+                         else:
+                             try:
+                                 RNS.Packet(link, payload).send()
+                             except Exception as e:
+                                 print(f"[Transport] Failed to send result packet: {e}")
+                         return
+
+                # Fallback to connectionless
                 # Determine destination
                 if message.sender_hash:
                     # We can send to hash if we have a mapping or use raw RNS if possible.
@@ -527,8 +667,10 @@ class NetworkTransport(Transport):
     def _send_packet(self, node_id: str, payload: bytes) -> bool:
         identity = self._node_identities.get(node_id)
         if identity is None:
+            print(f"[Transport] Error: No identity for {node_id}")
             return False
         if not self._ensure_path(node_id):
+            print(f"[Transport] Error: No path to {node_id}")
             return False
         destination = RNS.Destination(
             identity,
@@ -537,9 +679,23 @@ class NetworkTransport(Transport):
             self._app_name,
             self._aspect,
         )
+        
+        # Verify hash
+        stored_hash = self._node_destinations.get(node_id)
+        if stored_hash and destination.hash.hex() != stored_hash:
+            print(f"[Transport] Warning: Destination hash mismatch! {destination.hash.hex()} != {stored_hash}")
+            
+        print(f"[Transport] Sending packet to {node_id} ({len(payload)} bytes)...")
+        if len(payload) > 465: # Approximate safe limit for RNS single packets
+             print(f"[Transport] Warning: Payload size {len(payload)} exceeds typical MTU (465 bytes). Packet may fail.")
+
         packet = RNS.Packet(destination, payload)
-        packet.send()
-        return True
+        try:
+            packet.send()
+            return True
+        except Exception as e:
+             print(f"[Transport] Packet send failed: {e}")
+             return False
 
 
 class _AnnounceHandler:
@@ -562,4 +718,5 @@ class _AnnounceHandler:
                 self.transport._destination_to_node[message.destination_hash] = message.node_id
             if announced_identity is not None:
                 self.transport._node_identities[message.node_id] = announced_identity
+                self.transport._identity_hash_to_node_id[announced_identity.hash] = message.node_id
             super(NetworkTransport, self.transport).announce(message)
