@@ -45,6 +45,8 @@ class Worker:
         if self.llm_engine:
             print(f"[Worker:{self.transport.node_id}] Executing with LLM...")
             global_goal = assignment.global_goal or ""
+            global_context = assignment.global_context or ""
+            memory_context = assignment.memory_context or ""
             retrieved_context = ""
             if self.store:
                 query = f"{global_goal}\n{task.description}"
@@ -52,6 +54,8 @@ class Worker:
                 layers = [
                     ("global_context", ["global_context"], 1),
                     ("task_result", ["task_result"], 2),
+                    ("probe_evidence", ["probe_evidence"], 3),
+                    ("query_enhancement", ["query_enhancement"], 1),
                 ]
                 snippets = []
                 for layer_name, tags, limit in layers:
@@ -75,11 +79,13 @@ class Worker:
                 retrieved_block = f"Retrieved Context:\n{retrieved_context}\n\n"
             prompt = (
                 f"Global Goal: {global_goal}\n"
+                f"Global Context: {global_context}\n"
                 f"Role: {task.role}\n"
                 f"Subtask: {task.description}\n\n"
                 f"{retrieved_block}"
-                "Focus only on actions that advance the Global Goal. Do not introduce unrelated tasks. "
-                "Return the subtask result only."
+                f"Memory Context:\n{memory_context}\n\n"
+                "Focus only on evidence that advances the Global Goal. Do not introduce unrelated tasks. "
+                "Return a JSON object with keys: topic, evidence, reasoning, confidence."
             )
             # Assuming generate is blocking for now
             result_text = self.llm_engine.generate(prompt)

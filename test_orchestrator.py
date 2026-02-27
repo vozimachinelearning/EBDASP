@@ -11,6 +11,13 @@ from src.swarm.messages import Task, TaskAssignment, TaskResult
 from src.swarm.transport import Transport
 
 class MockLLMEngine:
+    def enhance_query(self, query: str, max_topics: int = 6, max_probes: int = 8):
+        return {
+            "enhanced_query": query,
+            "topics": ["Topic A", "Topic B"],
+            "probing_queries": ["Probe A", "Probe B"],
+        }
+
     def decompose_task(self, task_description: str, global_goal: str = None) -> List[str]:
         if "complex" in task_description:
             return ["Subtask 1", "Subtask 2"]
@@ -20,8 +27,10 @@ class MockLLMEngine:
         return [{"task": t, "role": "Worker"} for t in sub_tasks]
 
     def generate(self, prompt: str, **kwargs) -> str:
-        if "Status:" in prompt: # Consolidation prompt
+        if "Status:" in prompt:
             return "Status: DONE\nContent: Mock Final Answer"
+        if "assembling a response" in prompt:
+            return "Mock Final Answer"
         return "Mock Response"
 
     def generate_probing_queries(self, query: str, context: str, max_items: int = 5) -> List[str]:
@@ -69,6 +78,10 @@ class TestOrchestrator(unittest.TestCase):
         self.mock_transport = MockTransport()
         self.mock_llm = MockLLMEngine()
         self.mock_coordinator = MagicMock()
+        self.mock_coordinator.store = MagicMock()
+        self.mock_coordinator.store.query_memory.return_value = []
+        self.mock_coordinator.store.add_memory.return_value = {}
+        self.mock_coordinator.store.add_memories.return_value = 0
         self.orchestrator = Orchestrator(
             coordinator=self.mock_coordinator,
             transport=self.mock_transport,

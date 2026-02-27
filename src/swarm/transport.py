@@ -4,6 +4,7 @@ import threading
 import json
 import uuid
 import time
+import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import RNS
@@ -412,6 +413,7 @@ class NetworkTransport(Transport):
         heartbeat_ttl_seconds: float = 120.0,
         response_timeout_seconds: float = 15.0,
         announce_interval_seconds: float = 30.0,
+        identity_path: Optional[str] = None,
         time_provider: Optional[Callable[[], float]] = None,
     ) -> None:
         super().__init__(node_id=node_id, heartbeat_ttl_seconds=heartbeat_ttl_seconds, time_provider=time_provider)
@@ -428,11 +430,34 @@ class NetworkTransport(Transport):
         self._pending_lock = threading.Lock()
         self._stop_event = threading.Event()
         self._last_no_interface_log = 0.0
+        self._hash_mismatch_seen: Dict[str, str] = {}
         if rns_config_dir:
             RNS.Reticulum(rns_config_dir)
         else:
             RNS.Reticulum()
-        self._identity = RNS.Identity()
+        base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        identity_dir = os.getenv("SWARM_IDENTITY_DIR") or os.path.join(base_dir, "storage", "identities")
+        resolved_identity_path = identity_path or os.getenv("SWARM_IDENTITY_PATH")
+        if not resolved_identity_path:
+            resolved_identity_path = os.path.join(identity_dir, f"{node_id}.rns")
+        try:
+            os.makedirs(os.path.dirname(resolved_identity_path), exist_ok=True)
+        except Exception:
+            resolved_identity_path = None
+        identity = None
+        if resolved_identity_path and os.path.exists(resolved_identity_path):
+            try:
+                identity = RNS.Identity.from_file(resolved_identity_path)
+            except Exception:
+                identity = None
+        if identity is None:
+            identity = RNS.Identity()
+            if resolved_identity_path:
+                try:
+                    identity.to_file(resolved_identity_path)
+                except Exception:
+                    pass
+        self._identity = identity
         self._destination = RNS.Destination(
             self._identity,
             RNS.Destination.IN,
@@ -504,15 +529,14 @@ class NetworkTransport(Transport):
         }
 
     def announce(self, announcement: AnnounceCapabilities) -> None:
-        if not announcement.destination_hash:
-            announcement = AnnounceCapabilities(
-                node_id=announcement.node_id,
-                domains=list(announcement.domains),
-                collections=list(announcement.collections),
-                timestamp=announcement.timestamp,
-                signature=announcement.signature,
-                destination_hash=self._destination_hash_hex,
-            )
+        announcement = AnnounceCapabilities(
+            node_id=announcement.node_id,
+            domains=list(announcement.domains),
+            collections=list(announcement.collections),
+            timestamp=announcement.timestamp,
+            signature=announcement.signature,
+            destination_hash=self._destination_hash_hex,
+        )
         super().announce(announcement)
         if announcement.node_id in self._workers:
             payload = self.protocol.encode_compact(announcement)
@@ -963,7 +987,10 @@ class NetworkTransport(Transport):
         # Verify hash
         stored_hash = self._node_destinations.get(node_id)
         if stored_hash and destination.hash.hex() != stored_hash:
-            print(f"[Transport] Warning: Destination hash mismatch for {node_id}! {destination.hash.hex()} != {stored_hash}")
+            mismatch_key = f"{destination.hash.hex()}!= {stored_hash}"
+            if self._hash_mismatch_seen.get(node_id) != mismatch_key:
+                self._hash_mismatch_seen[node_id] = mismatch_key
+                print(f"[Transport] Warning: Destination hash mismatch for {node_id}! {destination.hash.hex()} != {stored_hash}")
             if stored_hash in self._destination_to_node and self._destination_to_node.get(stored_hash) == node_id:
                 self._destination_to_node.pop(stored_hash, None)
             self._node_destinations[node_id] = destination.hash.hex()
@@ -1039,10 +1066,13 @@ class _AnnounceHandler:
                 )
                 expected_hash = destination.hash.hex()
                 if message.destination_hash and message.destination_hash != expected_hash:
-                    print(
-                        f"[Transport] Warning: Announce hash mismatch for {message.node_id}! "
-                        f"{message.destination_hash} != {expected_hash}"
-                    )
+                    mismatch_key = f"{message.destination_hash}!={expected_hash}"
+                    if self.transport._hash_mismatch_seen.get(message.node_id) != mismatch_key:
+                        self.transport._hash_mismatch_seen[message.node_id] = mismatch_key
+                        print(
+                            f"[Transport] Warning: Announce hash mismatch for {message.node_id}! "
+                            f"{message.destination_hash} != {expected_hash}"
+                        )
                 previous_hash = self.transport._node_destinations.get(message.node_id)
                 if previous_hash and previous_hash in self.transport._destination_to_node:
                     if self.transport._destination_to_node.get(previous_hash) == message.node_id:

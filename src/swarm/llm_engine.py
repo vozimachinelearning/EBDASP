@@ -41,6 +41,38 @@ class LLMEngine:
         response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
         return response.strip()
 
+    def _safe_json(self, text: str):
+        try:
+            return json.loads(text.strip())
+        except Exception:
+            return None
+
+    def enhance_query(self, query: str, max_topics: int = 6, max_probes: int = 8) -> dict:
+        prompt = f"""
+You are enhancing a user query for a multi-agent evidence pipeline.
+Return a JSON object with keys: enhanced_query, topics, probing_queries.
+- enhanced_query: rewrite the query to be precise and complete.
+- topics: short noun-phrase topics covering the query (max {max_topics}).
+- probing_queries: specific questions to retrieve evidence (max {max_probes}).
+Return JSON only.
+Query: {query}
+"""
+        response = self.generate(prompt, max_new_tokens=512, temperature=0.2)
+        parsed = self._safe_json(response)
+        if isinstance(parsed, dict):
+            enhanced_query = str(parsed.get("enhanced_query") or "").strip() or query
+            topics = parsed.get("topics") if isinstance(parsed.get("topics"), list) else []
+            probes = parsed.get("probing_queries") if isinstance(parsed.get("probing_queries"), list) else []
+            topics = [str(item).strip() for item in topics if str(item).strip()][:max_topics]
+            probes = [str(item).strip() for item in probes if str(item).strip()][:max_probes]
+            return {
+                "enhanced_query": enhanced_query,
+                "topics": topics,
+                "probing_queries": probes,
+            }
+        probes = self.generate_probing_queries(query, query, max_items=max_probes)
+        return {"enhanced_query": query, "topics": [query], "probing_queries": probes}
+
     def generate_probing_queries(self, query: str, context: str, max_items: int = 5) -> List[str]:
         prompt = f"""
 Given the main query and current context, generate up to {max_items} probing questions that directly help answer the main query.
@@ -49,12 +81,9 @@ Current Context: {context}
 Return a JSON array of strings only.
 """
         response = self.generate(prompt, max_new_tokens=256, temperature=0.4)
-        try:
-            parsed = json.loads(response.strip())
-            if isinstance(parsed, list):
-                return [str(item).strip() for item in parsed if str(item).strip()][:max_items]
-        except Exception:
-            pass
+        parsed = self._safe_json(response)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()][:max_items]
         lines = [line.strip("- ").strip() for line in response.split("\n") if line.strip()]
         return lines[:max_items]
 
@@ -72,12 +101,9 @@ Return a JSON array of sub-task strings only.
 """
         response = self.generate(prompt, max_new_tokens=512, temperature=0.3)
         
-        try:
-            parsed = json.loads(response.strip())
-            if isinstance(parsed, list):
-                return [str(item).strip() for item in parsed if str(item).strip()]
-        except Exception:
-            pass
+        parsed = self._safe_json(response)
+        if isinstance(parsed, list):
+            return [str(item).strip() for item in parsed if str(item).strip()]
 
         sub_tasks = []
         for line in response.split('\n'):
