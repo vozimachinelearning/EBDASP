@@ -156,6 +156,8 @@ class TaskAssignment(Message):
     sender_hash: Optional[str] = None
     global_goal: Optional[str] = None
     global_context: Optional[str] = None
+    global_context_id: Optional[str] = None
+    global_context_version: Optional[int] = None
     memory_context: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -169,6 +171,8 @@ class TaskAssignment(Message):
             "sender_hash": self.sender_hash,
             "global_goal": self.global_goal,
             "global_context": self.global_context,
+            "global_context_id": self.global_context_id,
+            "global_context_version": self.global_context_version,
             "memory_context": self.memory_context,
         }
 
@@ -304,6 +308,8 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             sender_hash=data.get("sender_hash"),
             global_goal=data.get("global_goal"),
             global_context=data.get("global_context"),
+            global_context_id=data.get("global_context_id"),
+            global_context_version=data.get("global_context_version"),
             memory_context=data.get("memory_context"),
         )
     if message_type == "task_result":

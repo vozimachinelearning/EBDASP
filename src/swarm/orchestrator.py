@@ -46,6 +46,9 @@ class Orchestrator:
         self.transport.emit_activity("pipeline_start", node_id=self.transport.node_id, payload={"question": question})
         
         current_context = question
+        global_context_id = str(uuid.uuid4())
+        global_context_version = 0
+        self._broadcast_global_context(global_context_id, global_context_version, current_context)
         all_results = []
         final_answer = ""
         
@@ -98,9 +101,12 @@ Return a concise updated context that preserves the goal and removes unrelated c
                         "context": consolidated_context,
                     },
                 )
+            context_for_tasks = consolidated_context or current_context
+            global_context_version += 1
+            self._broadcast_global_context(global_context_id, global_context_version, context_for_tasks)
             decomposition_input = f"Original Goal: {question}\nCurrent Focus: {current_context}\n\nMemory:\n{memory_context}"
-            if consolidated_context:
-                decomposition_input = f"Original Goal: {question}\nCurrent Focus: {consolidated_context}\n\nMemory:\n{memory_context}"
+            if context_for_tasks:
+                decomposition_input = f"Original Goal: {question}\nCurrent Focus: {context_for_tasks}\n\nMemory:\n{memory_context}"
             sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input, global_goal=question)
             if not sub_tasks_desc:
                 print("No sub-tasks generated. Stopping cycles.")
@@ -247,7 +253,9 @@ Return a concise updated context that preserves the goal and removes unrelated c
                         sender_node_id=self.transport.node_id,
                         sender_hash=getattr(self.transport, '_destination_hash_hex', None),
                         global_goal=question,
-                        global_context=current_context,
+                        global_context=context_for_tasks,
+                        global_context_id=global_context_id,
+                        global_context_version=global_context_version,
                         memory_context=memory_context,
                     )
                     
@@ -382,6 +390,31 @@ Compose a coherent final response from the parts. Preserve correct order and rem
             "parts": [item for item in parts] if 'parts' in locals() else [],
             "final_answer": final_answer
         }
+
+    def _build_global_context_content(self, context_id: str, version: int, text: str) -> str:
+        return "\n".join(
+            [
+                "GLOBAL_CONTEXT",
+                f"context_id: {context_id}",
+                f"version: {version}",
+                "text:",
+                text,
+            ]
+        )
+
+    def _broadcast_global_context(self, context_id: str, version: int, text: str) -> None:
+        content = self._build_global_context_content(context_id, version, text)
+        self.coordinator.store.add_memory(
+            text=content,
+            source=self.transport.node_id,
+            tags=["global_context", f"context_id:{context_id}", f"context_version:{version}"],
+        )
+        node_ids = self.transport.available_nodes()
+        for worker_id in list(self.transport._workers.keys()):
+            if worker_id not in node_ids:
+                node_ids.append(worker_id)
+        for node_id in node_ids:
+            self.transport.send_context_update(node_id, content)
 
     def _broadcast_completion(self, result: TaskResult, done: int, total: int) -> None:
         payload = {

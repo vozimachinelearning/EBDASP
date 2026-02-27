@@ -203,7 +203,17 @@ class Transport:
         if node_id in self._workers:
             for worker in self._workers.values():
                 if worker.store:
-                    worker.store.add_memory(update.content, update.source_node, tags=["context_update"])
+                    tags = ["context_update"]
+                    payload = self._extract_global_context_payload(update.content)
+                    if payload:
+                        context_id_value = payload.get("context_id")
+                        if context_id_value:
+                            tags.append("global_context")
+                            tags.append(f"context_id:{context_id_value}")
+                        version_value = payload.get("version")
+                        if version_value is not None:
+                            tags.append(f"context_version:{version_value}")
+                    worker.store.add_memory(update.content, update.source_node, tags=tags)
             self._record_completion_from_content(update.content, update.source_node, update.context_id)
             return True
         return False
@@ -239,6 +249,40 @@ class Transport:
                 "context_id": context_id,
             },
         )
+
+    def _extract_global_context_payload(self, content: str) -> Optional[Dict[str, Any]]:
+        lines = content.splitlines()
+        if not lines:
+            return None
+        if lines[0].strip() != "GLOBAL_CONTEXT":
+            return None
+        context_id_value: Optional[str] = None
+        version_value: Optional[int] = None
+        text_lines: List[str] = []
+        in_text = False
+        for line in lines[1:]:
+            if line.startswith("context_id:"):
+                context_id_value = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("version:"):
+                raw = line.split(":", 1)[1].strip()
+                try:
+                    version_value = int(raw)
+                except Exception:
+                    version_value = None
+                continue
+            if line.startswith("text:"):
+                in_text = True
+                continue
+            if in_text:
+                text_lines.append(line)
+        if not context_id_value:
+            return None
+        return {
+            "context_id": context_id_value,
+            "version": version_value,
+            "text": "\n".join(text_lines).strip(),
+        }
 
     def _prune_stale(self) -> None:
         now = self._time_provider()
@@ -766,7 +810,17 @@ class NetworkTransport(Transport):
         if isinstance(message, ContextUpdate):
             for worker in self._workers.values():
                 if worker.store:
-                    worker.store.add_memory(message.content, message.source_node, tags=["context_update"])
+                    tags = ["context_update"]
+                    payload = self._extract_global_context_payload(message.content)
+                    if payload:
+                        context_id_value = payload.get("context_id")
+                        if context_id_value:
+                            tags.append("global_context")
+                            tags.append(f"context_id:{context_id_value}")
+                        version_value = payload.get("version")
+                        if version_value is not None:
+                            tags.append(f"context_version:{version_value}")
+                    worker.store.add_memory(message.content, message.source_node, tags=tags)
             self._record_completion_from_content(message.content, message.source_node, message.context_id)
             self.emit_activity(
                 "context_update",
