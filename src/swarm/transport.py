@@ -9,6 +9,7 @@ import RNS
 
 from .messages import (
     AnnounceCapabilities,
+    ContextUpdate,
     Heartbeat,
     QueryRequest,
     QueryResponse,
@@ -187,6 +188,20 @@ class Transport:
                     "text": message.text,
                 },
             )
+            return True
+        return False
+
+    def send_context_update(self, node_id: str, content: str, context_id: Optional[str] = None) -> bool:
+        update = ContextUpdate(
+            context_id=context_id or str(uuid.uuid4()),
+            content=content,
+            source_node=self.node_id,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
+        )
+        if node_id in self._workers:
+            for worker in self._workers.values():
+                if worker.store:
+                    worker.store.add_memory(update.content, update.source_node, tags=["context_update"])
             return True
         return False
 
@@ -428,6 +443,20 @@ class NetworkTransport(Transport):
         )
         return True
 
+    def send_context_update(self, node_id: str, content: str, context_id: Optional[str] = None) -> bool:
+        if node_id in self._workers:
+            return super().send_context_update(node_id, content, context_id=context_id)
+        if node_id not in self._node_identities:
+            return False
+        update = ContextUpdate(
+            context_id=context_id or str(uuid.uuid4()),
+            content=content,
+            source_node=self.node_id,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self._time_provider())),
+        )
+        payload = self.protocol.encode_binary(update)
+        return self._send_packet(node_id, payload)
+
     def interface_status(self) -> List[Dict[str, Any]]:
         interfaces = []
         for interface in list(RNS.Transport.interfaces):
@@ -654,6 +683,16 @@ class NetworkTransport(Transport):
                     "recipient": message.recipient,
                     "text": message.text,
                 },
+            )
+            return
+        if isinstance(message, ContextUpdate):
+            for worker in self._workers.values():
+                if worker.store:
+                    worker.store.add_memory(message.content, message.source_node, tags=["context_update"])
+            self.emit_activity(
+                "context_update",
+                node_id=message.source_node,
+                payload={"context_id": message.context_id},
             )
             return
 

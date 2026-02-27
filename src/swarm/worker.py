@@ -35,9 +35,14 @@ class Worker:
         print(f"  > Description: {task.description[:100]}...")
         
         result_text = ""
+        memory_context = ""
+        if self.store:
+            memories = self.store.query_memory(task.description, limit=3)
+            if memories:
+                memory_context = "\n".join([m.get("text", "") for m in memories])
         if self.llm_engine:
             print(f"[Worker:{self.transport.node_id}] Executing with LLM...")
-            prompt = f"Role: {task.role}\nTask: {task.description}\n\nPlease execute this task and provide the result."
+            prompt = f"Role: {task.role}\nTask: {task.description}\n\nMemory:\n{memory_context}\n\nPlease execute this task and provide the result."
             # Assuming generate is blocking for now
             result_text = self.llm_engine.generate(prompt)
             print(f"[Worker:{self.transport.node_id}] LLM Generation complete ({len(result_text)} chars).")
@@ -48,6 +53,13 @@ class Worker:
         duration = time.time() - start_time
         print(f"[Worker:{self.transport.node_id}] Task {task.task_id} completed in {duration:.2f}s")
 
+        if self.store:
+            self.store.add_memory(
+                text=f"Task: {task.description}\nResult: {result_text}",
+                source=self.transport.node_id,
+                tags=[task.role, "task_result"],
+            )
+
         return TaskResult(
             task_id=task.task_id,
             assignment_id=assignment.assignment_id,
@@ -56,4 +68,3 @@ class Worker:
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             confidence=1.0
         )
-
