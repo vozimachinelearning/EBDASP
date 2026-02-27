@@ -296,6 +296,19 @@ class SwarmTUI(App):
                 [f"node={node_id}", f"count={payload.get('tasks_count')}"],
             )
             return
+        if event_name == "pipeline_context_consolidated":
+            self._write_activity_block(
+                "Context Consolidated",
+                [
+                    f"node={node_id}",
+                    f"cycle={payload.get('cycle')}",
+                    f"probes={payload.get('probes')}",
+                    f"evidence={payload.get('evidence')}",
+                    "context:",
+                    f"{payload.get('context','')}",
+                ],
+            )
+            return
         if event_name == "task_dispatched":
             self._write_activity_block(
                 "Task Dispatched",

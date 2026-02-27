@@ -11,12 +11,12 @@ from src.swarm.messages import Task, TaskAssignment, TaskResult
 from src.swarm.transport import Transport
 
 class MockLLMEngine:
-    def decompose_task(self, task_description: str) -> List[str]:
+    def decompose_task(self, task_description: str, global_goal: str = None) -> List[str]:
         if "complex" in task_description:
             return ["Subtask 1", "Subtask 2"]
         return ["Simple Task"]
 
-    def assign_roles(self, sub_tasks: List[str]) -> List[dict]:
+    def assign_roles(self, sub_tasks: List[str], global_goal: str = None) -> List[dict]:
         return [{"task": t, "role": "Worker"} for t in sub_tasks]
 
     def generate(self, prompt: str, **kwargs) -> str:
@@ -24,10 +24,14 @@ class MockLLMEngine:
             return "Status: DONE\nContent: Mock Final Answer"
         return "Mock Response"
 
+    def generate_probing_queries(self, query: str, context: str, max_items: int = 5) -> List[str]:
+        return [f"Probe {i}" for i in range(min(2, max_items))]
+
 class MockTransport:
     def __init__(self):
         self.node_id = "local_node"
         self._destination_hash_hex = "mock_hash"
+        self._workers = {}
 
     def available_nodes(self) -> List[str]:
         return ["node1", "node2"]
@@ -50,6 +54,15 @@ class MockTransport:
         
     def send_query(self, node_id, request):
         return MagicMock()
+
+    def emit_activity(self, event: str, node_id: str = None, payload: Dict[str, Any] = None) -> None:
+        return None
+
+    def send_context_update(self, node_id: str, content: str, context_id: str = None) -> bool:
+        return True
+
+    def record_completion(self, payload: Dict[str, Any]) -> None:
+        return None
 
 class TestOrchestrator(unittest.TestCase):
     def setUp(self):

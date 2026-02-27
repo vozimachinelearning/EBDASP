@@ -47,10 +47,19 @@ class VectorStore:
                 count += 1
         return count
 
-    def query_memory(self, query: str, limit: int = 5) -> List[Dict[str, Any]]:
+    def query_memory(
+        self,
+        query: str,
+        limit: int = 5,
+        required_tags: Optional[List[str]] = None,
+        exclude_tags: Optional[List[str]] = None,
+        min_score: int = 1,
+    ) -> List[Dict[str, Any]]:
         if not os.path.exists(self.memory_path):
             return []
         query_tokens = {token.lower() for token in query.split() if token.strip()}
+        required = {tag for tag in (required_tags or []) if tag}
+        excluded = {tag for tag in (exclude_tags or []) if tag}
         scored: List[Dict[str, Any]] = []
         with open(self.memory_path, "r", encoding="utf-8") as f:
             for line in f:
@@ -61,10 +70,15 @@ class VectorStore:
                     record = json.loads(line)
                 except Exception:
                     continue
+                record_tags = {str(tag) for tag in record.get("tags", []) if tag}
+                if required and record_tags.isdisjoint(required):
+                    continue
+                if excluded and not record_tags.isdisjoint(excluded):
+                    continue
                 text = str(record.get("text", ""))
                 tokens = {token.lower() for token in text.split() if token.strip()}
                 score = len(query_tokens.intersection(tokens))
-                if score > 0:
+                if score >= max(1, min_score):
                     record["score"] = score
                     scored.append(record)
         scored.sort(key=lambda item: item.get("score", 0), reverse=True)

@@ -1,4 +1,5 @@
 import torch
+import json
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 from typing import List, Optional
@@ -40,23 +41,44 @@ class LLMEngine:
         response = self.tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
         return response.strip()
 
-    def decompose_task(self, task_description: str) -> List[str]:
+    def generate_probing_queries(self, query: str, context: str, max_items: int = 5) -> List[str]:
+        prompt = f"""
+Given the main query and current context, generate up to {max_items} probing questions that directly help answer the main query.
+Main Query: {query}
+Current Context: {context}
+Return a JSON array of strings only.
+"""
+        response = self.generate(prompt, max_new_tokens=256, temperature=0.4)
+        try:
+            parsed = json.loads(response.strip())
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()][:max_items]
+        except Exception:
+            pass
+        lines = [line.strip("- ").strip() for line in response.split("\n") if line.strip()]
+        return lines[:max_items]
+
+    def decompose_task(self, task_description: str, global_goal: Optional[str] = None) -> List[str]:
         """
         Decomposes a complex task into sub-tasks using the LLM.
         Returns a list of sub-task descriptions.
         """
         prompt = f"""
-You are a task decomposition expert. Break down the following complex task into a list of independent sub-tasks that can be executed in parallel or sequence.
-Task: {task_description}
+You are a task decomposition expert. Break down the task into sub-tasks that directly contribute to the global goal.
+Global Goal: {global_goal or task_description}
+Task Context: {task_description}
 
-Format your output as a bulleted list of sub-tasks. Do not include any other text.
-- Sub-task 1
-- Sub-task 2
-...
+Return a JSON array of sub-task strings only.
 """
         response = self.generate(prompt, max_new_tokens=512, temperature=0.3)
         
-        # Parse the response into a list
+        try:
+            parsed = json.loads(response.strip())
+            if isinstance(parsed, list):
+                return [str(item).strip() for item in parsed if str(item).strip()]
+        except Exception:
+            pass
+
         sub_tasks = []
         for line in response.split('\n'):
             line = line.strip()
@@ -69,13 +91,14 @@ Format your output as a bulleted list of sub-tasks. Do not include any other tex
                     
         return sub_tasks
 
-    def assign_roles(self, sub_tasks: List[str]) -> List[dict]:
+    def assign_roles(self, sub_tasks: List[str], global_goal: Optional[str] = None) -> List[dict]:
         """
         Assigns roles to each sub-task.
         Returns a list of dicts: {'task': str, 'role': str}
         """
         prompt = f"""
-Assign a specific role to each of the following tasks. The roles should be descriptive (e.g., 'Researcher', 'Coder', 'Reviewer', 'Planner').
+Assign a specific role to each task, ensuring all roles align to the global goal.
+Global Goal: {global_goal or ""}
 
 Tasks:
 {chr(10).join([f"- {t}" for t in sub_tasks])}

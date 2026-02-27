@@ -58,10 +58,50 @@ class Orchestrator:
                 payload={"cycle": cycle + 1, "max_cycles": max_cycles},
             )
             # 1. Decompose
-            memory_hits = self.coordinator.store.query_memory(f"{question}\n{current_context}", limit=5)
+            memory_hits = self.coordinator.store.query_memory(
+                f"{question}\n{current_context}",
+                limit=5,
+                exclude_tags=["context_update", "task_completion", "part", "final_answer", "cycle_context"],
+                min_score=2,
+            )
             memory_context = "\n".join([item.get("text", "") for item in memory_hits])
-            decomposition_input = f"{current_context}\n\nMemory:\n{memory_context}"
-            sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input)
+            probing_questions = self.llm_engine.generate_probing_queries(question, current_context)
+            evidence_hits: List[Dict[str, Any]] = []
+            for probe in probing_questions:
+                evidence_hits.extend(
+                    self.coordinator.store.query_memory(
+                        probe,
+                        limit=3,
+                        exclude_tags=["context_update", "task_completion", "part", "final_answer", "cycle_context"],
+                        min_score=1,
+                    )
+                )
+            evidence_text = "\n".join([item.get("text", "") for item in evidence_hits])
+            consolidated_context = current_context
+            if evidence_text:
+                consolidation_prompt = f"""
+You are consolidating evidence to keep the swarm aligned to the original goal.
+Original Goal: {question}
+Current Context: {current_context}
+Evidence:
+{evidence_text}
+Return a concise updated context that preserves the goal and removes unrelated content.
+"""
+                consolidated_context = self.llm_engine.generate(consolidation_prompt, max_new_tokens=256, temperature=0.3)
+                self.transport.emit_activity(
+                    "pipeline_context_consolidated",
+                    node_id=self.transport.node_id,
+                    payload={
+                        "cycle": cycle + 1,
+                        "probes": len(probing_questions),
+                        "evidence": len(evidence_hits),
+                        "context": consolidated_context,
+                    },
+                )
+            decomposition_input = f"Original Goal: {question}\nCurrent Focus: {current_context}\n\nMemory:\n{memory_context}"
+            if consolidated_context:
+                decomposition_input = f"Original Goal: {question}\nCurrent Focus: {consolidated_context}\n\nMemory:\n{memory_context}"
+            sub_tasks_desc = self.llm_engine.decompose_task(decomposition_input, global_goal=question)
             if not sub_tasks_desc:
                 print("No sub-tasks generated. Stopping cycles.")
                 self.transport.emit_activity(
@@ -72,7 +112,7 @@ class Orchestrator:
                 break
                 
             # 2. Assign Roles
-            assignments_data = self.llm_engine.assign_roles(sub_tasks_desc)
+            assignments_data = self.llm_engine.assign_roles(sub_tasks_desc, global_goal=question)
             
             # 3. Create Task Objects
             tasks = []

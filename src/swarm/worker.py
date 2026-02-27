@@ -38,7 +38,12 @@ class Worker:
         result_text = ""
         memory_context = ""
         if self.store:
-            memories = self.store.query_memory(task.description, limit=3)
+            memories = self.store.query_memory(
+                f"{assignment.global_goal or ''}\n{task.description}",
+                limit=3,
+                exclude_tags=["context_update", "task_completion", "final_answer", "cycle_context"],
+                min_score=2,
+            )
             if memories:
                 memory_context = "\n".join([m.get("text", "") for m in memories])
         if self.llm_engine:
@@ -54,7 +59,8 @@ class Worker:
                 f"Role: {task.role}\n"
                 f"Subtask: {task.description}\n\n"
                 f"Memory:\n{shared_memory}\n\n"
-                "Please execute this subtask so it advances the Global Goal and provide the result."
+                "Focus only on actions that advance the Global Goal. Do not introduce unrelated tasks. "
+                "Return the subtask result only."
             )
             # Assuming generate is blocking for now
             result_text = self.llm_engine.generate(prompt)
