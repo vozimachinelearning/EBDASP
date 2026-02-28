@@ -79,6 +79,9 @@ class Orchestrator:
 
     def _looks_like_json(self, text: str) -> bool:
         stripped = text.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z0-9]*", "", stripped).strip()
+            stripped = stripped.rstrip("`").strip()
         return bool(stripped) and (stripped.startswith("{") or stripped.startswith("["))
 
     def _normalize_eval_text(self, text: str) -> str:
@@ -571,6 +574,14 @@ Write a comprehensive, well-structured answer in natural language. Avoid JSON or
                 final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=900, temperature=0.3)
                 if self._looks_like_json(final_answer) or len(final_answer.split()) < 120:
                     final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=1100, temperature=0.4)
+                if self._looks_like_json(final_answer):
+                    rewrite_prompt = f"""
+Rewrite the content below into a fluent, long-form answer in natural language.
+Do not output JSON, code blocks, or bullet-only lists.
+Content:
+{final_answer}
+"""
+                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1100, temperature=0.35)
                 print(f"Task completed. Final Answer: {final_answer[:200]}...")
                 self.transport.emit_activity(
                     "pipeline_final",
