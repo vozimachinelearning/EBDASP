@@ -23,15 +23,19 @@ class QueryRequest(Message):
 
 @dataclass
 class EvidenceChunk(Message):
-    chunk_id: str
-    content_hash: str
-    text: str
-    source: str
-    timestamp: str
-    signature: str
+    chunk_id: Optional[str] = None
+    content_hash: Optional[str] = None
+    text: Optional[str] = None
+    source: Optional[str] = None
+    timestamp: Optional[str] = None
+    signature: Optional[str] = None
+    probe_id: Optional[str] = None
+    worker_id: Optional[str] = None
+    chunks: Optional[List[Dict[str, Any]]] = None
+    worker_insight: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        data = asdict(self)
+        data = {key: value for key, value in asdict(self).items() if value is not None}
         data["type"] = "evidence_chunk"
         return data
 
@@ -108,6 +112,26 @@ class RouteRequest(Message):
 
 
 @dataclass
+class ProbeQuery(Message):
+    probe_id: str
+    original_question: str
+    probe_text: str
+    iteration: int
+    global_memory_summary: Optional[str]
+    timestamp: str
+    signature: str
+    domain: Optional[str] = None
+    target_node_id: Optional[str] = None
+    sender_node_id: Optional[str] = None
+    sender_hash: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "probe_query"
+        return data
+
+
+@dataclass
 class RouteResponse(Message):
     query_id: str
     node_ids: List[str]
@@ -129,6 +153,22 @@ class TextMessage(Message):
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         data["type"] = "text_message"
+        return data
+
+
+@dataclass
+class GlobalMemoryUpdate(Message):
+    iteration: int
+    consolidated_context: str
+    key_entities: List[str]
+    open_questions: List[str]
+    vector_store_snapshot: Optional[Dict[str, Any]]
+    timestamp: str
+    context_id: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        data = asdict(self)
+        data["type"] = "global_memory_update"
         return data
 
 
@@ -242,12 +282,16 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
         )
     if message_type == "evidence_chunk":
         return EvidenceChunk(
-            chunk_id=data["chunk_id"],
-            content_hash=data["content_hash"],
-            text=data["text"],
-            source=data["source"],
-            timestamp=data["timestamp"],
-            signature=data["signature"],
+            chunk_id=data.get("chunk_id"),
+            content_hash=data.get("content_hash"),
+            text=data.get("text"),
+            source=data.get("source"),
+            timestamp=data.get("timestamp"),
+            signature=data.get("signature"),
+            probe_id=data.get("probe_id"),
+            worker_id=data.get("worker_id"),
+            chunks=data.get("chunks"),
+            worker_insight=data.get("worker_insight"),
         )
     if message_type == "index_hint":
         return IndexHint(
@@ -277,6 +321,20 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             domain=data.get("domain"),
             limit=int(data.get("limit", 1)),
         )
+    if message_type == "probe_query":
+        return ProbeQuery(
+            probe_id=data["probe_id"],
+            original_question=data.get("original_question", ""),
+            probe_text=data.get("probe_text", ""),
+            iteration=int(data.get("iteration", 0)),
+            global_memory_summary=data.get("global_memory_summary"),
+            timestamp=data.get("timestamp", ""),
+            signature=data.get("signature", ""),
+            domain=data.get("domain"),
+            target_node_id=data.get("target_node_id"),
+            sender_node_id=data.get("sender_node_id"),
+            sender_hash=data.get("sender_hash"),
+        )
     if message_type == "route_response":
         return RouteResponse(
             query_id=data["query_id"],
@@ -289,6 +347,16 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             recipient=data["recipient"],
             text=data.get("text", ""),
             timestamp=data.get("timestamp", ""),
+        )
+    if message_type == "global_memory_update":
+        return GlobalMemoryUpdate(
+            iteration=int(data.get("iteration", 0)),
+            consolidated_context=data.get("consolidated_context", ""),
+            key_entities=list(data.get("key_entities", [])),
+            open_questions=list(data.get("open_questions", [])),
+            vector_store_snapshot=data.get("vector_store_snapshot"),
+            timestamp=data.get("timestamp", ""),
+            context_id=data.get("context_id"),
         )
     if message_type == "task":
         return Task(

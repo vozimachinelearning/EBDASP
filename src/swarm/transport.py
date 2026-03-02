@@ -12,7 +12,10 @@ import RNS
 from .messages import (
     AnnounceCapabilities,
     ContextUpdate,
+    EvidenceChunk,
+    GlobalMemoryUpdate,
     Heartbeat,
+    ProbeQuery,
     QueryRequest,
     QueryResponse,
     RouteRequest,
@@ -166,6 +169,44 @@ class Transport:
         if worker is not None:
             return worker.handle_task(assignment)
         raise NotImplementedError("Remote task sending not implemented in base Transport")
+
+    def send_probe(self, node_id: str, probe: ProbeQuery) -> EvidenceChunk:
+        worker = self._workers.get(node_id)
+        if worker is None:
+            raise ValueError(f"Unknown worker node: {node_id}")
+        self.emit_activity(
+            "probe_sent",
+            node_id=node_id,
+            payload={
+                "probe_id": probe.probe_id,
+                "iteration": probe.iteration,
+            },
+        )
+        response = worker.handle_probe(probe)
+        self.emit_activity(
+            "probe_response",
+            node_id=node_id,
+            payload={
+                "probe_id": response.probe_id,
+                "chunks_count": len(response.chunks or []),
+            },
+        )
+        return response
+
+    def send_global_memory_update(self, node_id: str, update: GlobalMemoryUpdate) -> bool:
+        worker = self._workers.get(node_id)
+        if worker is None:
+            return False
+        worker.update_global_memory(update)
+        self.emit_activity(
+            "global_memory_update",
+            node_id=node_id,
+            payload={
+                "iteration": update.iteration,
+                "context_id": update.context_id,
+            },
+        )
+        return True
 
     def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
         message = TextMessage(
@@ -592,6 +633,59 @@ class NetworkTransport(Transport):
             raise TimeoutError(f"No response for query {request.query_id}")
         return response
 
+    def send_probe(self, node_id: str, probe: ProbeQuery) -> EvidenceChunk:
+        worker = self._workers.get(node_id)
+        if worker is not None:
+            return super().send_probe(node_id, probe)
+        if node_id not in self._node_identities:
+            raise ValueError(f"Unknown remote node: {node_id}")
+        if not self._has_outbound_interface():
+            raise ConnectionError("No outbound interfaces available for remote probe delivery")
+        network_probe = ProbeQuery(
+            probe_id=probe.probe_id,
+            original_question=probe.original_question,
+            probe_text=probe.probe_text,
+            iteration=probe.iteration,
+            global_memory_summary=probe.global_memory_summary,
+            timestamp=probe.timestamp,
+            signature=probe.signature,
+            domain=probe.domain,
+            target_node_id=node_id,
+            sender_node_id=self.node_id,
+            sender_hash=self._destination_hash_hex,
+        )
+        payload = self.protocol.encode_binary(network_probe)
+        link = self._ensure_link_active(node_id, wait_seconds=2.0, attempts=3)
+        if not link:
+            raise ConnectionError(f"Link to {node_id} failed")
+        event = threading.Event()
+        with self._pending_lock:
+            self._pending_events[probe.probe_id] = event
+        if len(payload) > link.MDU:
+            try:
+                RNS.Resource(payload, link)
+            except Exception as e:
+                with self._pending_lock:
+                    self._pending_events.pop(probe.probe_id, None)
+                raise e
+        else:
+            packet = RNS.Packet(link, payload)
+            try:
+                packet.send()
+            except Exception as e:
+                with self._pending_lock:
+                    self._pending_events.pop(probe.probe_id, None)
+                raise e
+        event.wait()
+        with self._pending_lock:
+            response = self._pending_responses.pop(probe.probe_id, None)
+            self._pending_events.pop(probe.probe_id, None)
+        if response is None:
+            raise TimeoutError(f"No response for probe {probe.probe_id}")
+        if not isinstance(response, EvidenceChunk):
+            raise TypeError(f"Expected EvidenceChunk, got {type(response)}")
+        return response
+
     def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
         worker = self._workers.get(node_id)
         if worker is not None:
@@ -656,6 +750,30 @@ class NetworkTransport(Transport):
             
         print(f"[NetworkTransport] Received valid response for Task {assignment.task.task_id} from {node_id}")
         return response
+
+    def send_global_memory_update(self, node_id: str, update: GlobalMemoryUpdate) -> bool:
+        worker = self._workers.get(node_id)
+        if worker is not None:
+            return super().send_global_memory_update(node_id, update)
+        if node_id not in self._node_identities:
+            return False
+        if not self._has_outbound_interface():
+            return False
+        payload = self.protocol.encode_binary(update)
+        link = self._ensure_link_active(node_id, wait_seconds=1.5, attempts=2)
+        if not link:
+            return False
+        if len(payload) > link.MDU:
+            try:
+                RNS.Resource(payload, link)
+            except Exception:
+                return False
+        else:
+            try:
+                RNS.Packet(link, payload).send()
+            except Exception:
+                return False
+        return True
 
     def send_message(self, node_id: str, text: str, sender: Optional[str] = None) -> bool:
         if node_id in self._workers:
@@ -870,6 +988,23 @@ class NetworkTransport(Transport):
                 elif reply_to and reply_to in self._destination_to_node:
                     self._send_payload(self._destination_to_node[reply_to], payload)
             return
+        if isinstance(message, ProbeQuery):
+            target = message.target_node_id
+            if target and target not in self._workers:
+                return
+            worker = self._workers.get(target) if target else None
+            if worker is None and self._workers:
+                worker = next(iter(self._workers.values()))
+            if worker is None:
+                return
+            response = worker.handle_probe(message)
+            payload = self.protocol.encode_binary(response)
+            reply_to_node_id = message.sender_node_id
+            if reply_to_node_id and reply_to_node_id in self._node_identities:
+                self._send_payload(reply_to_node_id, payload)
+            elif message.sender_hash and message.sender_hash in self._destination_to_node:
+                self._send_payload(self._destination_to_node[message.sender_hash], payload)
+            return
         if isinstance(message, TaskAssignment):
             worker = None
             target = message.assigned_to_node
@@ -919,6 +1054,16 @@ class NetworkTransport(Transport):
                     self._pending_responses[message.assignment_id] = message
                     self._pending_events[message.assignment_id].set()
             return
+        if isinstance(message, EvidenceChunk):
+            probe_id = message.probe_id
+            if probe_id:
+                with self._pending_lock:
+                    event = self._pending_events.get(probe_id)
+                    if event is None:
+                        return
+                    self._pending_responses[probe_id] = message
+                    event.set()
+            return
 
         if isinstance(message, QueryResponse):
             with self._pending_lock:
@@ -942,6 +1087,18 @@ class NetworkTransport(Transport):
             return
         if isinstance(message, ContextUpdate):
             self._handle_context_update(message.content, message.source_node, message.context_id)
+            return
+        if isinstance(message, GlobalMemoryUpdate):
+            for worker in self._workers.values():
+                worker.update_global_memory(message)
+            self.emit_activity(
+                "global_memory_update_received",
+                node_id=self.node_id,
+                payload={
+                    "iteration": message.iteration,
+                    "context_id": message.context_id,
+                },
+            )
             return
 
     def _ensure_path(self, node_id: str, wait_seconds: float = 2.0) -> bool:

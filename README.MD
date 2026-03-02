@@ -4,19 +4,21 @@
 Protocolo y base de código para un enjambre de agentes ultraligeros sobre Reticulum con RAG recursivo distribuido.
 
 ## Estructura
-- `swarm/src/swarm`: núcleo del protocolo y orquestación
-- `swarm/examples`: ejemplos mínimos de uso
-- `plan-enjambre-reticulum.md`: plan de implementación
+- `src/swarm`: núcleo del protocolo y orquestación
+- `examples`: ejemplos de uso (incluye TUI)
+- `start-reticulum.bat`: bootstrap de entorno, modelos y Reticulum
+- `config`: configuración de Reticulum
+- `models`: modelos descargados localmente
 
 ## Mensajes y serialización
-- JSON compacto con `encode_compact` y `decode_compact`
+- JSON compacto con `encode_compact` y `decode_compact` en `Protocol`
 - Binario comprimido con `encode_binary` y `decode_binary`
-- Routing mediante `AnnounceCapabilities`, `RouteRequest`, `RouteResponse`
+- Routing con `AnnounceCapabilities`, `RouteRequest`, `RouteResponse`
 
 ## Iniciar Reticulum
 
 ```bat
-c:\Users\LoOper\.reticulum\swarm\start-reticulum.bat
+c:\Users\LoOper\.reticulum\swarm\EBDASP\start-reticulum.bat
 ```
 
 ## Modelos
@@ -24,8 +26,11 @@ c:\Users\LoOper\.reticulum\swarm\start-reticulum.bat
   - `SWARM_LLM_REPO` (por defecto `Qwen/Qwen2.5-0.5B-Instruct`)
   - `SWARM_EMBED_REPO` (por defecto `BAAI/bge-m3`)
 - Rutas locales creadas por el .bat:
-  - `SWARM_LLM_PATH` en `swarm\models\llm`
-  - `SWARM_EMBED_PATH` en `swarm\models\embeddings`
+  - `SWARM_LLM_PATH` en `EBDASP\models\llm`
+  - `SWARM_EMBED_PATH` en `EBDASP\models\embeddings`
+- El demo detecta automáticamente `models\llm` y `models\embeddings` y expone:
+  - `SWARM_MODEL_PATH`
+  - `SWARM_EMBEDDING_PATH`
 
 ## Auto-conexión de dispositivos
 - Usa AutoInterface en el config y el mismo `group_id` en todos los nodos
@@ -82,5 +87,17 @@ responses = orchestrator.distribute(
 ## Ejecutar ejemplo
 
 ```bash
-python c:\Users\LoOper\.reticulum\swarm\examples\minimal_demo.py
+python c:\Users\LoOper\.reticulum\swarm\EBDASP\examples\minimal_demo.py
+```
+
+## Variables de entorno útiles
+- `SWARM_NETWORK`: `1` para red Reticulum, `0` para modo local
+- `SWARM_NODE_ID`: identificador del nodo
+- `SWARM_DOMAIN`: dominio principal del nodo
+- `SWARM_COLLECTIONS`: colecciones separadas por coma
+- `RNS_CONFIG_DIR`: ruta del `config` de Reticulum
+- `SWARM_MODEL_PATH` y `SWARM_EMBEDDING_PATH`: rutas locales de modelos
+
+```bash
+python c:\Users\LoOper\.reticulum\swarm\EBDASP\examples\minimal_demo.py
 ```

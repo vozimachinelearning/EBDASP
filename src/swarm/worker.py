@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import time
 import uuid
-from typing import Optional, TYPE_CHECKING, Dict, Any
+import os
+import json
+from typing import Optional, TYPE_CHECKING, Dict, Any, List
 
-from .messages import QueryRequest, QueryResponse, TaskAssignment, TaskResult
+from .messages import EvidenceChunk, GlobalMemoryUpdate, ProbeQuery, QueryRequest, QueryResponse, TaskAssignment, TaskResult
 from .protocol import Protocol
 from .vector_store import VectorStore
 # Only import LLMEngine if needed, or make it optional
@@ -26,6 +28,18 @@ class Worker:
             return cleaned
         return cleaned[:limit].rstrip() + "..."
 
+    def _split_text(self, text: str, chunk_size: int = 800) -> List[str]:
+        cleaned = " ".join(text.split())
+        if not cleaned:
+            return []
+        chunks = []
+        start = 0
+        while start < len(cleaned):
+            end = min(len(cleaned), start + chunk_size)
+            chunks.append(cleaned[start:end].strip())
+            start = end
+        return [chunk for chunk in chunks if chunk]
+
     def handle_query(self, request: QueryRequest) -> QueryResponse:
         return QueryResponse(
             query_id=request.query_id,
@@ -34,6 +48,62 @@ class Worker:
             confidence=0.0,
             next_queries=[],
         )
+
+    def handle_probe(self, probe_query: ProbeQuery) -> EvidenceChunk:
+        query = probe_query.probe_text
+        if probe_query.global_memory_summary:
+            query = f"{probe_query.probe_text}\n{probe_query.global_memory_summary}"
+        chunks: List[Dict[str, Any]] = []
+        if self.store:
+            hits = self.store.query_memory(
+                query,
+                limit=int(os.getenv("EVIDENCE_LIMIT_PER_WORKER", "5")),
+                required_tags=[],
+                exclude_tags=["final_answer"],
+                min_score=0.2,
+            )
+            for item in hits:
+                chunks.append(
+                    {
+                        "text": str(item.get("text", "")),
+                        "source_doc": str(item.get("source", "")),
+                        "relevance_score": float(item.get("score", 0.0) or 0.0),
+                        "metadata": {
+                            "tags": item.get("tags", []),
+                            "memory_id": item.get("memory_id"),
+                        },
+                    }
+                )
+        worker_insight = None
+        if self.llm_engine and chunks:
+            prompt = (
+                f"Pregunta: {probe_query.probe_text}\n"
+                f"Fragmentos:\n{json.dumps([c['text'] for c in chunks], ensure_ascii=False)}\n"
+                "Resume en una sola frase por qué estos fragmentos ayudan a responder."
+            )
+            worker_insight = self.llm_engine.generate(prompt, max_new_tokens=96, temperature=0.3)
+        evidence = EvidenceChunk(
+            probe_id=probe_query.probe_id,
+            worker_id=self.transport.node_id,
+            chunks=chunks,
+            worker_insight=worker_insight,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            signature="",
+        )
+        if self.store and chunks:
+            records = []
+            for chunk in chunks:
+                records.append(
+                    {
+                        "memory_id": str(uuid.uuid4()),
+                        "text": chunk.get("text", ""),
+                        "source": self.transport.node_id,
+                        "tags": ["probe_evidence", f"probe_id:{probe_query.probe_id}"],
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    }
+                )
+            self.store.add_memories(records)
+        return evidence
 
     def handle_task(self, assignment: TaskAssignment) -> TaskResult:
         task = assignment.task
@@ -117,6 +187,25 @@ class Worker:
             completed=True,
             confidence=1.0
         )
+
+    def update_global_memory(self, update: GlobalMemoryUpdate) -> None:
+        if not self.store:
+            return
+        context_id = update.context_id or f"global:{update.iteration}"
+        chunks = self._split_text(update.consolidated_context, chunk_size=800)
+        records = []
+        for chunk in chunks:
+            records.append(
+                {
+                    "memory_id": str(uuid.uuid4()),
+                    "text": chunk,
+                    "source": self.transport.node_id,
+                    "tags": ["global_memory", "global_context", f"context_id:{context_id}", f"iteration:{update.iteration}"],
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                }
+            )
+        if records:
+            self.store.add_memories(records)
 
     def _extract_global_context_payload(self, content: str) -> Optional[Dict[str, Any]]:
         lines = content.splitlines()

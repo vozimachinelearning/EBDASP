@@ -1,12 +1,13 @@
-from typing import Any, Dict, List, Optional, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, TYPE_CHECKING, Tuple
 import re
 import json
 import uuid
 import time
 import threading
+import os
 
 from .coordinator import Coordinator
-from .messages import QueryRequest, QueryResponse, RouteRequest, Task, TaskAssignment, TaskResult
+from .messages import EvidenceChunk, GlobalMemoryUpdate, ProbeQuery, QueryRequest, QueryResponse, RouteRequest, Task, TaskAssignment, TaskResult
 from .transport import Transport
 
 if TYPE_CHECKING:
@@ -84,6 +85,12 @@ class Orchestrator:
             stripped = stripped.rstrip("`").strip()
         return bool(stripped) and (stripped.startswith("{") or stripped.startswith("["))
 
+    def _safe_json(self, text: str) -> Optional[Any]:
+        try:
+            return json.loads(text.strip())
+        except Exception:
+            return None
+
     def _normalize_eval_text(self, text: str) -> str:
         lowered = text.lower()
         lowered = re.sub(r"\b(a|an|the)\b", " ", lowered)
@@ -141,6 +148,7 @@ class Orchestrator:
             ("task_result", ["task_result"], 3),
             ("context_update", ["context_update"], 2),
             ("probe_evidence", ["probe_evidence"], 3),
+            ("global_memory", ["global_memory"], 2),
         ]
         results: List[Dict[str, str]] = []
         for layer_name, tags, limit in layers:
@@ -177,6 +185,229 @@ class Orchestrator:
         route_request = RouteRequest(query_id=request.query_id, domain=domain, limit=max_workers)
         route_response = self.transport.route(route_request)
         return [self.transport.send_query(node_id, request) for node_id in route_response.node_ids]
+
+    def _generate_probe_queries(
+        self,
+        original_question: str,
+        consolidated_context: str,
+        open_questions: List[str],
+        max_items: int,
+    ) -> List[str]:
+        if not self.llm_engine:
+            return [original_question]
+        if open_questions:
+            probes = [q for q in open_questions if q]
+            if probes:
+                return probes[:max_items]
+        prompt = f"""
+Basado en la pregunta original y el contexto consolidado, genera hasta {max_items} sondas concretas.
+Pregunta original: {original_question}
+Contexto consolidado: {consolidated_context}
+Devuelve un JSON con la clave probes (lista de strings).
+"""
+        response = self.llm_engine.generate(prompt, max_new_tokens=256, temperature=0.3)
+        parsed = self._safe_json(response)
+        if isinstance(parsed, dict):
+            probes = parsed.get("probes")
+            if isinstance(probes, list):
+                cleaned = [str(item).strip() for item in probes if str(item).strip()]
+                if cleaned:
+                    return cleaned[:max_items]
+        fallback = self.llm_engine.generate_probing_queries(original_question, consolidated_context, max_items=max_items)
+        return fallback or [original_question]
+
+    def _flatten_evidence(self, evidence_list: List[EvidenceChunk]) -> List[Dict[str, Any]]:
+        flattened: List[Dict[str, Any]] = []
+        seen = set()
+        for evidence in evidence_list:
+            for chunk in evidence.chunks or []:
+                text = str(chunk.get("text", "")).strip()
+                if not text:
+                    continue
+                key = re.sub(r"\s+", " ", text.lower())
+                if key in seen:
+                    continue
+                seen.add(key)
+                flattened.append(chunk)
+        return flattened
+
+    def consolidate_evidence(self, evidence_list: List[EvidenceChunk], current_state: Dict[str, Any]) -> Dict[str, Any]:
+        flattened = self._flatten_evidence(evidence_list)
+        original_question = current_state.get("original_question", "")
+        if not flattened:
+            return {
+                "consolidated_context": current_state.get("global_memory_pool", ""),
+                "key_entities": current_state.get("key_entities", []),
+                "open_questions": current_state.get("open_questions", []) or [original_question],
+            }
+        evidence_text = "\n".join([self._compact_text(str(item.get("text", "")), limit=600) for item in flattened])
+        if not self.llm_engine or len(evidence_text.split()) < 120:
+            consolidated_context = evidence_text
+            return {
+                "consolidated_context": consolidated_context,
+                "key_entities": current_state.get("key_entities", []),
+                "open_questions": current_state.get("open_questions", []),
+            }
+        prompt = f"""
+Resume los siguientes fragmentos en un contexto coherente.
+Extrae entidades clave y preguntas abiertas.
+Pregunta original: {original_question}
+Fragmentos:
+{evidence_text}
+Devuelve JSON con claves: consolidated_context, key_entities, open_questions.
+"""
+        response = self.llm_engine.generate(prompt, max_new_tokens=512, temperature=0.2)
+        parsed = self._safe_json(response)
+        if isinstance(parsed, dict):
+            consolidated_context = str(parsed.get("consolidated_context", "")).strip()
+            key_entities = parsed.get("key_entities") if isinstance(parsed.get("key_entities"), list) else []
+            open_questions = parsed.get("open_questions") if isinstance(parsed.get("open_questions"), list) else []
+            return {
+                "consolidated_context": consolidated_context or evidence_text,
+                "key_entities": [str(item).strip() for item in key_entities if str(item).strip()],
+                "open_questions": [str(item).strip() for item in open_questions if str(item).strip()],
+            }
+        return {
+            "consolidated_context": evidence_text,
+            "key_entities": current_state.get("key_entities", []),
+            "open_questions": current_state.get("open_questions", []),
+        }
+
+    def run_reasoning_cycle(self, original_question: str, max_iterations: Optional[int] = None, domain: Optional[str] = None) -> Dict[str, Any]:
+        if not self.llm_engine:
+            raise RuntimeError("LLMEngine is required for reasoning cycle.")
+        iterations = max_iterations or int(os.getenv("MAX_REASONING_ITERATIONS", "5"))
+        probe_strategy = os.getenv("PROBE_STRATEGY", "default").lower()
+        evidence_limit = int(os.getenv("EVIDENCE_LIMIT_PER_WORKER", "5"))
+        global_memory_frequency = int(os.getenv("GLOBAL_MEMORY_UPDATE_FREQUENCY", "1"))
+        context_id = str(uuid.uuid4())
+        state: Dict[str, Any] = {
+            "original_question": original_question,
+            "iteration_history": [],
+            "global_memory_pool": "",
+            "key_entities": [],
+            "open_questions": [original_question],
+        }
+        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception:
+            pass
+        log_path = os.path.join(log_dir, f"reasoning_cycle_{int(time.time())}.json")
+        for iteration in range(1, iterations + 1):
+            max_probes = max(2, min(6, evidence_limit))
+            probes = self._generate_probe_queries(
+                original_question,
+                state.get("global_memory_pool", ""),
+                state.get("open_questions", []),
+                max_items=max_probes,
+            )
+            if probe_strategy == "question_decomposition" and state.get("open_questions"):
+                probes = state.get("open_questions", [])[:max_probes]
+            if not probes:
+                probes = [original_question]
+            available_nodes = self.transport.available_nodes(domain=domain)
+            for worker_id in list(self.transport._workers.keys()):
+                if worker_id not in available_nodes:
+                    available_nodes.append(worker_id)
+            evidence_list: List[EvidenceChunk] = []
+            threads = []
+            lock = threading.Lock()
+
+            def dispatch(node_id: str, probe_text: str) -> None:
+                try:
+                    probe = ProbeQuery(
+                        probe_id=str(uuid.uuid4()),
+                        original_question=original_question,
+                        probe_text=probe_text,
+                        iteration=iteration,
+                        global_memory_summary=state.get("global_memory_pool", ""),
+                        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                        signature="",
+                        domain=domain,
+                        target_node_id=node_id,
+                        sender_node_id=self.transport.node_id,
+                        sender_hash=getattr(self.transport, "_destination_hash_hex", None),
+                    )
+                    response = self.transport.send_probe(node_id, probe)
+                    with lock:
+                        evidence_list.append(response)
+                except Exception:
+                    return
+
+            if available_nodes:
+                for index, probe_text in enumerate(probes):
+                    node_id = available_nodes[index % len(available_nodes)]
+                    t = threading.Thread(target=dispatch, args=(node_id, probe_text))
+                    threads.append(t)
+                    t.start()
+                for t in threads:
+                    t.join()
+
+            consolidation = self.consolidate_evidence(evidence_list, state)
+            consolidated_context = consolidation.get("consolidated_context", "") or state.get("global_memory_pool", "")
+            key_entities = self._dedupe_items(state.get("key_entities", []) + consolidation.get("key_entities", []))
+            open_questions = self._dedupe_items(consolidation.get("open_questions", []))
+            state["global_memory_pool"] = consolidated_context
+            state["key_entities"] = key_entities
+            state["open_questions"] = open_questions
+            iteration_payload = {
+                "iteration": iteration,
+                "probes": probes,
+                "evidence_received": [item.to_dict() for item in evidence_list],
+                "consolidated_context": consolidated_context,
+                "key_entities": key_entities,
+                "open_questions": open_questions,
+            }
+            state["iteration_history"].append(iteration_payload)
+            if self.coordinator.store:
+                self.coordinator.store.add_memory(
+                    text=consolidated_context,
+                    source=self.transport.node_id,
+                    tags=["global_memory", f"context_id:{context_id}", f"iteration:{iteration}"],
+                )
+            if iteration % global_memory_frequency == 0:
+                update = GlobalMemoryUpdate(
+                    iteration=iteration,
+                    consolidated_context=consolidated_context,
+                    key_entities=key_entities,
+                    open_questions=open_questions,
+                    vector_store_snapshot=None,
+                    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    context_id=context_id,
+                )
+                for node_id in available_nodes:
+                    self.transport.send_global_memory_update(node_id, update)
+            try:
+                with open(log_path, "a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(iteration_payload, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        final_prompt = f"""
+Responde a la pregunta original usando el contexto consolidado.
+Pregunta: {original_question}
+Contexto consolidado: {state.get("global_memory_pool", "")}
+Entidades clave: {json.dumps(state.get("key_entities", []), ensure_ascii=False)}
+"""
+        final_answer = self.llm_engine.generate(final_prompt, max_new_tokens=900, temperature=0.3)
+        if self._looks_like_json(final_answer):
+            rewrite_prompt = f"""
+Reescribe el contenido como una respuesta extensa y natural.
+Contenido:
+{final_answer}
+"""
+            final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=900, temperature=0.3)
+        if self.coordinator.store:
+            self.coordinator.store.add_memory(
+                text=f"Q: {original_question}\nA: {final_answer}",
+                source=self.transport.node_id,
+                tags=["final_answer", f"context_id:{context_id}"],
+            )
+        return {
+            "original_request": original_question,
+            "final_answer": final_answer,
+            "state": state,
+        }
 
     def decompose_and_distribute(self, question: str, max_cycles: int = 2, golden_answers: Optional[List[str]] = None) -> Dict[str, Any]:
         """

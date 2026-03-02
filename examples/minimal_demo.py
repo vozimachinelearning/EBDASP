@@ -542,14 +542,7 @@ class SwarmTUI(App):
         try:
             # Use the orchestrator to manage the full cycle
             # This handles decomposition, distribution, and consolidation
-            golden_answers = None
-            if self._eval_map:
-                golden_answers = self._eval_map.get(user_input.lower())
-            should_eval = bool(golden_answers) and (self._eval_always or len(user_input.split()) >= self._eval_min_words)
-            if should_eval:
-                results = self.orchestrator.decompose_and_distribute(user_input, golden_answers=golden_answers)
-            else:
-                results = self.orchestrator.decompose_and_distribute(user_input)
+            results = self.orchestrator.run_reasoning_cycle(user_input)
             
             final_answer = results.get('final_answer', 'No answer generated.')
             parts = results.get("parts", [])
@@ -588,16 +581,6 @@ class SwarmTUI(App):
                 f"[Pipeline {pipeline_id}] FINAL",
                 ["response:", f"{final_answer}"],
             )
-            evaluation = results.get("evaluation")
-            if evaluation:
-                self._write_activity_block(
-                    f"[Pipeline {pipeline_id}] Evaluation",
-                    [
-                        f"em={evaluation.get('em')}",
-                        f"f1={evaluation.get('f1')}",
-                        f"answers={evaluation.get('answers_count')}",
-                    ],
-                )
             print(f"Pipeline completed. Final Answer: {final_answer[:100]}...")
             
         except Exception as e:
