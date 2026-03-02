@@ -327,9 +327,16 @@ Return a valid JSON object with a single key "probes" containing a list of strin
         
         # Ensure we use ALL nodes: remote ones + local self
         # Use a set to avoid duplicates if self is somehow in available_nodes
-        all_workers = list(set(available_nodes + [self.transport.node_id]))
+        candidates = list(set(available_nodes + [self.transport.node_id]))
         
-        print(f"[Orchestrator] Dispatching {len(probes)} probes. Available pool: {len(all_workers)} nodes ({all_workers})")
+        # Filter reachable nodes to ensure we don't send to unreachable peers
+        all_workers = self.transport.filter_reachable_nodes(candidates)
+        
+        if len(all_workers) < len(candidates):
+            skipped = set(candidates) - set(all_workers)
+            print(f"[Orchestrator] Skipped unreachable nodes: {skipped}")
+            
+        print(f"[Orchestrator] Dispatching {len(probes)} probes. Reachable pool: {len(all_workers)} nodes ({all_workers})")
 
         import random
         

@@ -71,6 +71,20 @@ class Transport:
             self._last_seen[node_id] = self._time_provider()
         self.emit_activity("heartbeat", node_id=node_id, payload={})
 
+    def is_node_reachable(self, node_id: str) -> bool:
+        """
+        Checks if a node is reachable.
+        Base implementation checks if the node is a registered local worker.
+        Subclasses should override this to check network reachability.
+        """
+        return node_id in self._workers
+
+    def filter_reachable_nodes(self, node_ids: List[str]) -> List[str]:
+        """
+        Filters a list of node IDs, returning only those that are reachable.
+        """
+        return [nid for nid in node_ids if self.is_node_reachable(nid)]
+
     def available_nodes(self, domain: Optional[str] = None) -> List[str]:
         self._prune_stale()
         with self._lock:
@@ -571,9 +585,6 @@ class NetworkTransport(Transport):
             return False
         return self._ensure_path(node_id, wait_seconds=0)
 
-    def filter_reachable_nodes(self, node_ids: List[str]) -> List[str]:
-        return [node_id for node_id in node_ids if self.is_node_reachable(node_id)]
-
     def get_node_health(self, node_id: str) -> Dict[str, Any]:
         stored_hash = self._node_destinations.get(node_id)
         identity = self._node_identities.get(node_id)
@@ -950,6 +961,15 @@ class NetworkTransport(Transport):
             self._aspect
         )
         
+        # Force hash if mismatch
+        stored_hash = self._node_destinations.get(node_id)
+        if stored_hash and destination.hash.hex() != stored_hash:
+            print(f"[Transport] Forcing destination hash for link to {node_id}: {stored_hash}")
+            try:
+                destination.hash = bytes.fromhex(stored_hash)
+            except Exception as e:
+                print(f"[Transport] Failed to set destination hash for link: {e}")
+        
         print(f"[Transport] Establishing link to {node_id}...")
         link = RNS.Link(destination)
         link.set_link_closed_callback(self._on_link_closed)
@@ -1278,19 +1298,30 @@ class NetworkTransport(Transport):
         
         # Verify hash
         stored_hash = self._node_destinations.get(node_id)
-        if stored_hash and destination.hash.hex() != stored_hash:
-            mismatch_key = f"{destination.hash.hex()}!= {stored_hash}"
+        dest_hash = destination.hash.hex()
+        
+        if stored_hash and dest_hash != stored_hash:
+            mismatch_key = f"{dest_hash}!= {stored_hash}"
             if self._hash_mismatch_seen.get(node_id) != mismatch_key:
                 self._hash_mismatch_seen[node_id] = mismatch_key
-                print(f"[Transport] Warning: Destination hash mismatch for {node_id}! {destination.hash.hex()} != {stored_hash}")
-            if stored_hash in self._destination_to_node and self._destination_to_node.get(stored_hash) == node_id:
-                self._destination_to_node.pop(stored_hash, None)
-            self._node_destinations[node_id] = destination.hash.hex()
-            self._destination_to_node[destination.hash.hex()] = node_id
+                print(f"[Transport] Info: Destination hash mismatch for {node_id}. Local={dest_hash} Announced={stored_hash}. Trusting Announced.")
             
-        print(f"[Transport] Sending packet to {node_id} ({len(payload)} bytes)...")
-        if len(payload) > 465: # Approximate safe limit for RNS single packets
-             print(f"[Transport] Warning: Payload size {len(payload)} exceeds typical MTU (465 bytes). Packet may fail.")
+            # Trust the announced hash
+            try:
+                destination.hash = bytes.fromhex(stored_hash)
+                dest_hash = stored_hash
+            except Exception as e:
+                print(f"[Transport] Failed to set announced hash: {e}")
+
+        print(f"[Transport] Sending packet to {node_id} ({len(payload)} bytes) Hash={dest_hash[:16]}...")
+        
+        # DEBUG: Check path validity
+        if not RNS.Transport.has_path(destination.hash):
+             print(f"[Transport] WARNING: No RNS path for {dest_hash[:16]} immediately before send!")
+             RNS.Transport.request_path(destination.hash)
+        else:
+             next_hop = RNS.Transport.next_hop_interface(destination.hash)
+             # print(f"[Transport] Path exists via {next_hop}")
 
         packet = RNS.Packet(destination, payload)
         try:
@@ -1357,19 +1388,23 @@ class _AnnounceHandler:
                     self.transport._aspect,
                 )
                 expected_hash = destination.hash.hex()
-                if message.destination_hash and message.destination_hash != expected_hash:
-                    mismatch_key = f"{message.destination_hash}!={expected_hash}"
+                actual_hash = destination_hash.hex()
+                
+                if actual_hash != expected_hash:
+                    mismatch_key = f"{actual_hash}!={expected_hash}"
                     if self.transport._hash_mismatch_seen.get(message.node_id) != mismatch_key:
                         self.transport._hash_mismatch_seen[message.node_id] = mismatch_key
                         print(
-                            f"[Transport] Warning: Announce hash mismatch for {message.node_id}! "
-                            f"{message.destination_hash} != {expected_hash}"
+                            f"[Transport] Info: Announce hash mismatch for {message.node_id}! "
+                            f"Announced={actual_hash} Expected={expected_hash}. Trusting Announced."
                         )
+                
                 previous_hash = self.transport._node_destinations.get(message.node_id)
                 if previous_hash and previous_hash in self.transport._destination_to_node:
                     if self.transport._destination_to_node.get(previous_hash) == message.node_id:
                         self.transport._destination_to_node.pop(previous_hash, None)
-                message.destination_hash = expected_hash
-                self.transport._node_destinations[message.node_id] = expected_hash
-                self.transport._destination_to_node[expected_hash] = message.node_id
+                
+                # Store the actual hash
+                self.transport._node_destinations[message.node_id] = actual_hash
+                self.transport._destination_to_node[actual_hash] = message.node_id
             super(NetworkTransport, self.transport).announce(message)
