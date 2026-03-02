@@ -86,10 +86,68 @@ class Orchestrator:
         return bool(stripped) and (stripped.startswith("{") or stripped.startswith("["))
 
     def _safe_json(self, text: str) -> Optional[Any]:
+        if text is None:
+            return None
+        candidate = text.strip()
+        if not candidate:
+            return None
         try:
-            return json.loads(text.strip())
+            return json.loads(candidate)
+        except Exception:
+            pass
+        extracted = self._extract_first_json(candidate)
+        if not extracted:
+            return None
+        try:
+            return json.loads(extracted)
         except Exception:
             return None
+
+    def _extract_first_json(self, text: str) -> Optional[str]:
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```[a-zA-Z0-9]*", "", candidate).strip()
+            fence_end = candidate.rfind("```")
+            if fence_end != -1:
+                candidate = candidate[:fence_end].strip()
+        for idx, ch in enumerate(candidate):
+            if ch not in "{[":
+                continue
+            extracted = self._extract_balanced_json(candidate, idx)
+            if extracted:
+                return extracted
+        return None
+
+    def _extract_balanced_json(self, text: str, start: int) -> Optional[str]:
+        closer_for = {"{": "}", "[": "]"}
+        stack: List[str] = []
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "{[":
+                stack.append(closer_for[ch])
+                continue
+            if ch in "}]":
+                if not stack or ch != stack[-1]:
+                    return None
+                stack.pop()
+                if not stack:
+                    return text[start : i + 1]
+        return None
 
     def _normalize_eval_text(self, text: str) -> str:
         lowered = text.lower()
@@ -206,8 +264,9 @@ Original Question: {original_question}
 Consolidated Context: {consolidated_context}
 
 Return a valid JSON object with a single key "probes" containing a list of strings.
+Return JSON only.
 """
-        response = self.llm_engine.generate(prompt, max_new_tokens=256, temperature=0.3)
+        response = self.llm_engine.generate(prompt, max_new_tokens=256, temperature=0.0)
         parsed = self._safe_json(response)
         if isinstance(parsed, dict):
             probes = parsed.get("probes")
@@ -300,6 +359,7 @@ Return a valid JSON object with a single key "probes" containing a list of strin
             " \"probe_2\": \"Content of probe 2\",\n"
             " \"probe_3\": \"Content of probe 3\"\n"
             "}\n"
+            "Return JSON only.\n"
         )
         
         prev_probes_str = "\n".join(previous_probes) if previous_probes else "None"
@@ -307,7 +367,7 @@ Return a valid JSON object with a single key "probes" containing a list of strin
         
         full_prompt = f"{probe_generator_system}\n\n{user_content}"
         
-        response = self.llm_engine.generate(full_prompt, max_new_tokens=512, temperature=0.3)
+        response = self.llm_engine.generate(full_prompt, max_new_tokens=512, temperature=0.0)
         
         parsed = self._safe_json(response)
         if isinstance(parsed, dict):
@@ -315,8 +375,77 @@ Return a valid JSON object with a single key "probes" containing a list of strin
             for k, v in parsed.items():
                 if k.startswith("probe_") and isinstance(v, str) and v.strip():
                     probes.append(v.strip())
-            return probes
-        return []
+            probes = [p for p in probes if p and p not in previous_probes]
+            if probes:
+                return probes[:3]
+
+        fallback = []
+        if hasattr(self.llm_engine, "generate_probing_queries"):
+            try:
+                fallback = self.llm_engine.generate_probing_queries(query, context, max_items=3)
+            except Exception:
+                fallback = []
+        fallback = [p for p in fallback if p and p not in previous_probes]
+        if fallback:
+            return fallback[:3]
+
+        return [query]
+
+    def _consolidate_evidence_state(
+        self,
+        original_question: str,
+        previous_context: str,
+        evidence_list: List[EvidenceChunk],
+        previous_probes: List[str],
+        max_entities: int = 10,
+        max_open_questions: int = 6,
+    ) -> Dict[str, Any]:
+        evidence_lines: List[str] = []
+        for ev in evidence_list:
+            finding = ev.fused_insight or ev.worker_insight or ""
+            if finding.strip():
+                evidence_lines.append(f"- [{ev.worker_id}] {self._compact_text(finding, limit=360)}")
+                continue
+            chunks = ev.chunks or []
+            for chunk in chunks[:3]:
+                text = str(chunk.get("text", "")).strip()
+                if text:
+                    evidence_lines.append(f"- [{ev.worker_id}] {self._compact_text(text, limit=360)}")
+        evidence_text = "\n".join(evidence_lines) if evidence_lines else "- (no evidence)"
+
+        fallback_context = "\n".join([part for part in [previous_context.strip(), evidence_text.strip()] if part]).strip()
+        if not self.llm_engine:
+            return {"consolidated_context": fallback_context, "key_entities": [], "open_questions": []}
+
+        probes_tail = previous_probes[-10:] if previous_probes else []
+        prompt = f"""
+You are consolidating distributed evidence for a multi-node reasoning loop.
+Original Question: {original_question}
+Previous Consolidated Context: {previous_context}
+Previous Probes: {json.dumps(probes_tail, ensure_ascii=False)}
+New Evidence:
+{evidence_text}
+
+Return JSON only with keys:
+- consolidated_context: string (keep it tightly aligned to the original question)
+- key_entities: list of strings (max {max_entities})
+- open_questions: list of strings (max {max_open_questions}) to guide next probes
+"""
+        response = self.llm_engine.generate(prompt, max_new_tokens=640, temperature=0.0)
+        parsed = self._safe_json(response)
+        if isinstance(parsed, dict):
+            consolidated_context = str(parsed.get("consolidated_context") or "").strip()
+            key_entities = parsed.get("key_entities") if isinstance(parsed.get("key_entities"), list) else []
+            open_questions = parsed.get("open_questions") if isinstance(parsed.get("open_questions"), list) else []
+            key_entities_clean = [str(item).strip() for item in key_entities if str(item).strip()]
+            open_questions_clean = [str(item).strip() for item in open_questions if str(item).strip()]
+            if consolidated_context:
+                return {
+                    "consolidated_context": consolidated_context,
+                    "key_entities": key_entities_clean[:max_entities],
+                    "open_questions": open_questions_clean[:max_open_questions],
+                }
+        return {"consolidated_context": fallback_context, "key_entities": [], "open_questions": []}
 
     def _dispatch_probes(self, probes: List[str], original_question: str, global_summary: str, previous_probes: List[str]) -> List[EvidenceChunk]:
         """
@@ -472,8 +601,11 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
         print(f"[Orchestrator] Starting ComoRAG Reasoning Cycle for: {original_question}")
         
         historical_information = ""
-        previous_probes = []
-        step_answers = []
+        previous_probes: List[str] = []
+        open_questions: List[str] = []
+        key_entities: List[str] = []
+        reasoning_context_id = str(uuid.uuid4())
+        step_answers: List[Dict[str, Any]] = []
         
         for i in range(max_iterations):
             print(f"[Orchestrator] Iteration {i+1}/{max_iterations}")
@@ -496,8 +628,16 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             else:
                 print(f"[Orchestrator] Iteration 1: Skipping early answer check to force swarm probe distribution.")
             
-            # 2. Generate Probes
-            new_probes = self._generate_comorag_probes(original_question, historical_information, previous_probes)
+            # 2. Generate Probes (JSON-first)
+            if i == 0:
+                new_probes = self._generate_comorag_probes(original_question, historical_information, previous_probes)
+            else:
+                new_probes = self._generate_probe_queries(
+                    original_question,
+                    historical_information,
+                    open_questions,
+                    max_items=3,
+                )
             if not new_probes:
                 print("[Orchestrator] No new probes. Stopping.")
                 break
@@ -507,10 +647,43 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             # 3. Dispatch & Collect
             collected_evidence = self._dispatch_probes(new_probes, original_question, historical_information, previous_probes)
             
-            # 4. Consolidate
-            for ev in collected_evidence:
-                finding = ev.fused_insight or ev.worker_insight or "No insight provided."
-                historical_information += f"\nFinding from Node {ev.worker_id}: {finding}\n"
+            # 4. Consolidate (JSON) + publish distributed memory
+            consolidated = self._consolidate_evidence_state(
+                original_question=original_question,
+                previous_context=historical_information,
+                evidence_list=collected_evidence,
+                previous_probes=previous_probes,
+            )
+            historical_information = str(consolidated.get("consolidated_context") or "").strip()
+            key_entities = consolidated.get("key_entities") if isinstance(consolidated.get("key_entities"), list) else []
+            open_questions = consolidated.get("open_questions") if isinstance(consolidated.get("open_questions"), list) else []
+
+            update = GlobalMemoryUpdate(
+                iteration=i + 1,
+                consolidated_context=historical_information,
+                key_entities=[str(item) for item in key_entities if str(item).strip()],
+                open_questions=[str(item) for item in open_questions if str(item).strip()],
+                vector_store_snapshot=None,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                context_id=reasoning_context_id,
+            )
+
+            if self.coordinator.store and historical_information:
+                self.coordinator.store.add_memory(
+                    text=historical_information,
+                    source=self.transport.node_id,
+                    tags=["global_memory", "global_context", f"context_id:{reasoning_context_id}", f"iteration:{i+1}"],
+                )
+
+            recipients: List[str] = []
+            for nid in list(self.transport.available_nodes()) + list(getattr(self.transport, "_workers", {}).keys()):
+                if nid and nid != self.transport.node_id and nid not in recipients:
+                    recipients.append(nid)
+            for nid in recipients:
+                try:
+                    self.transport.send_global_memory_update(nid, update)
+                except Exception:
+                    continue
 
         # Final attempt if loop finishes
         print(f"[Orchestrator] Max iterations reached. Synthesizing final answer...")

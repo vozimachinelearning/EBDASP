@@ -4,6 +4,7 @@ import time
 import uuid
 import sys
 import json
+import re
 from typing import List, Tuple, Optional, Dict
 
 from textual.app import App, ComposeResult
@@ -337,99 +338,104 @@ class SwarmTUI(App):
         if event_name == "message_received":
             sender = payload.get("sender") or node_id
             text = payload.get("text", "")
-            self._write_activity(f"{sender}: {text}")
-            return
-        if event_name == "pipeline_start":
-            self._write_activity_block("Pipeline Start", [f"node={node_id}", f"question={payload.get('question','')}"])
-            return
-        if event_name == "pipeline_cycle_start":
-            self._write_activity_block(
-                "Pipeline Cycle",
-                [f"node={node_id}", f"cycle={payload.get('cycle')}", f"max_cycles={payload.get('max_cycles')}"],
-            )
-            return
-        if event_name == "pipeline_tasks_created":
-            self._write_activity_block(
-                "Subtasks Created",
-                [f"node={node_id}", f"count={payload.get('tasks_count')}"],
-            )
-            return
-        if event_name == "pipeline_context_consolidated":
-            self._write_activity_block(
-                "Context Consolidated",
-                [
-                    f"node={node_id}",
-                    f"cycle={payload.get('cycle')}",
-                    f"probes={payload.get('probes')}",
-                    f"evidence={payload.get('evidence')}",
-                    "context:",
-                    f"{payload.get('context','')}",
-                ],
-            )
-            return
-        if event_name == "task_dispatched":
-            self._write_activity_block(
-                "Task Dispatched",
-                [
-                    f"node={node_id}",
-                    f"task_id={payload.get('task_id','')}",
-                    f"assignment_id={payload.get('assignment_id','')}",
-                    f"role={payload.get('role','')}",
-                    f"attempt={payload.get('attempt','')}",
-                ],
-            )
+            formatted = self._format_response_text(text)
+            if formatted:
+                self._write_activity(f"{sender}: {formatted}")
             return
         if event_name == "task_completed":
-            self._write_activity_block(
-                "Task Completed",
-                [
-                    f"node={node_id}",
-                    f"task_id={payload.get('task_id','')}",
-                    f"result_id={payload.get('result_id','')}",
-                    f"completed={payload.get('completed', True)}",
-                    f"progress={payload.get('done',0)}/{payload.get('total',0)}",
-                    "response:",
-                    f"{payload.get('result','')}",
-                ],
-            )
-            return
-        if event_name == "task_error":
-            self._write_activity_block(
-                "Task Error",
-                [f"node={node_id}", f"task_id={payload.get('task_id','')}", f"error={payload.get('error','')}"],
-            )
-            return
-        if event_name == "pipeline_waiting":
-            self._write_activity_block("Waiting For Tasks", [f"node={node_id}", f"total={payload.get('total',0)}"])
-            return
-        if event_name == "pipeline_results_ready":
-            self._write_activity_block("Results Ready", [f"node={node_id}", f"count={payload.get('results_count',0)}"])
+            result = payload.get("result", "")
+            formatted = self._format_response_text(result)
+            if formatted:
+                self._write_activity(f"[{node_id}] {formatted}")
             return
         if event_name == "pipeline_final":
-            self._write_activity_block("Final Answer", ["response:", f"{payload.get('final_answer','')}"])
+            formatted = self._format_response_text(payload.get("final_answer", ""))
+            if formatted:
+                self._write_activity(f"[Final] {formatted}")
             return
-        if event_name == "pipeline_evaluation":
-            self._write_activity_block(
-                "Evaluation",
-                [
-                    f"em={payload.get('em')}",
-                    f"f1={payload.get('f1')}",
-                    f"answers={payload.get('answers_count')}",
-                ],
-            )
-            return
-        if event_name == "pipeline_no_tasks":
-            self._write_activity_block("No Tasks Generated", [f"node={node_id}"])
-            return
-        if event_name == "pipeline_no_workers":
-            self._write_activity_block("No Workers Available", [f"node={node_id}"])
-            return
-        if event_name == "pipeline_continue":
-            self._write_activity_block(
-                "Pipeline Continue",
-                [f"node={node_id}", f"cycle={payload.get('cycle')}", f"context={payload.get('context','')}"],
-            )
-            return
+
+    def _format_response_text(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, dict):
+            if isinstance(value.get("final_answer"), str) and value.get("final_answer").strip():
+                return value["final_answer"].strip()
+            if isinstance(value.get("content"), str) and value.get("content").strip():
+                return value["content"].strip()
+            if isinstance(value.get("consolidated_context"), str) and value.get("consolidated_context").strip():
+                return value["consolidated_context"].strip()
+            return json.dumps(value, ensure_ascii=False, indent=2)
+        if isinstance(value, list):
+            parts = []
+            for item in value:
+                if isinstance(item, str) and item.strip():
+                    parts.append(item.strip())
+                elif isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text").strip():
+                    parts.append(item["text"].strip())
+            return "\n".join(parts).strip()
+        if not isinstance(value, str):
+            return str(value).strip()
+        text = value.strip()
+        if not text:
+            return ""
+        parsed = self._try_parse_json_from_text(text)
+        if isinstance(parsed, (dict, list)):
+            return self._format_response_text(parsed)
+        return text
+
+    def _try_parse_json_from_text(self, text: str):
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```[a-zA-Z0-9]*", "", candidate).strip()
+            fence_end = candidate.rfind("```")
+            if fence_end != -1:
+                candidate = candidate[:fence_end].strip()
+        for idx, ch in enumerate(candidate):
+            if ch not in "{[":
+                continue
+            extracted = self._extract_balanced_json(candidate, idx)
+            if not extracted:
+                continue
+            try:
+                return json.loads(extracted)
+            except Exception:
+                continue
+        return None
+
+    def _extract_balanced_json(self, text: str, start: int) -> str:
+        closer_for = {"{": "}", "[": "]"}
+        stack = []
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "{[":
+                stack.append(closer_for[ch])
+                continue
+            if ch in "}]":
+                if not stack or ch != stack[-1]:
+                    return ""
+                stack.pop()
+                if not stack:
+                    return text[start : i + 1]
+        return ""
 
     def refresh_status(self) -> None:
         self.health_table.clear()
@@ -504,8 +510,7 @@ class SwarmTUI(App):
         3. Consolidate results into a final response.
         """
         pipeline_id = str(uuid.uuid4())
-        self._write_activity(f"[Pipeline {pipeline_id}] START")
-        self._write_activity(f"[Pipeline {pipeline_id}] Query: {user_input}")
+        self._write_activity(f"You: {user_input}")
         print(f"Starting swarm pipeline for: {user_input}")
         
         try:
@@ -516,22 +521,11 @@ class SwarmTUI(App):
             final_answer = results.get('final_answer', 'No answer generated.')
             parts = results.get("parts", [])
             if parts:
-                self._write_activity_block(f"[Pipeline {pipeline_id}] Subtask Responses", [f"count={len(parts)}"])
                 for part in parts:
-                    part_id = part.get("part_id", "")
                     node_id = part.get("node_id", "")
-                    completed = part.get("completed", True)
-                    task_id = part.get("task_id", "")
-                    self._write_activity_block(
-                        f"[Pipeline {pipeline_id}] Subtask {task_id}",
-                        [
-                            f"node={node_id}",
-                            f"part_id={part_id}",
-                            f"completed={completed}",
-                            "response:",
-                            f"{part.get('result','')}",
-                        ],
-                    )
+                    formatted = self._format_response_text(part.get("result", ""))
+                    if formatted:
+                        self._write_activity(f"[{node_id or 'worker'}] {formatted}")
             results_list = results.get("results", [])
             for item in results_list:
                 evidence = item.get("evidence", [])
@@ -540,24 +534,23 @@ class SwarmTUI(App):
                         chunk_id = chunk.get("chunk_id", "")
                         source = chunk.get("source", "")
                         text = chunk.get("text", "")
-                        self._write_activity_block(
-                            f"[Pipeline {pipeline_id}] Evidence {chunk_id}",
-                            [f"source={source}", "text:", f"{text}"],
-                        )
+                        formatted = self._format_response_text(text)
+                        if formatted:
+                            label = f"[Evidence {chunk_id}]" if chunk_id else "[Evidence]"
+                            prefix = f"{label} {source}: " if source else f"{label} "
+                            self._write_activity(prefix + formatted)
             
-            # Display the result in the activity log (chat view)
-            self._write_activity_block(
-                f"[Pipeline {pipeline_id}] FINAL",
-                ["response:", f"{final_answer}"],
-            )
+            formatted_final = self._format_response_text(final_answer)
+            if formatted_final:
+                self._write_activity(formatted_final)
             print(f"Pipeline completed. Final Answer: {final_answer[:100]}...")
             
         except Exception as e:
             error_msg = f"Swarm pipeline error: {str(e)}"
-            self._write_activity(f"[Pipeline {pipeline_id}] ERROR {error_msg}")
+            self._write_activity(error_msg)
             print(error_msg)
         finally:
-            self._write_activity(f"[Pipeline {pipeline_id}] END")
+            return
 
     def _run_batch_evaluation(self) -> None:
         items = self._load_eval_items(self._batch_eval_path)

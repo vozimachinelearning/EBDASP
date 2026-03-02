@@ -1,5 +1,6 @@
 import torch
 import json
+import re
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 from typing import List, Optional
@@ -42,10 +43,68 @@ class LLMEngine:
         return response.strip()
 
     def _safe_json(self, text: str):
+        if text is None:
+            return None
+        candidate = text.strip()
+        if not candidate:
+            return None
         try:
-            return json.loads(text.strip())
+            return json.loads(candidate)
+        except Exception:
+            pass
+        extracted = self._extract_first_json(candidate)
+        if not extracted:
+            return None
+        try:
+            return json.loads(extracted)
         except Exception:
             return None
+
+    def _extract_first_json(self, text: str) -> Optional[str]:
+        candidate = text.strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```[a-zA-Z0-9]*", "", candidate).strip()
+            fence_end = candidate.rfind("```")
+            if fence_end != -1:
+                candidate = candidate[:fence_end].strip()
+        for idx, ch in enumerate(candidate):
+            if ch not in "{[":
+                continue
+            extracted = self._extract_balanced_json(candidate, idx)
+            if extracted:
+                return extracted
+        return None
+
+    def _extract_balanced_json(self, text: str, start: int) -> Optional[str]:
+        closer_for = {"{": "}", "[": "]"}
+        stack: List[str] = []
+        in_string = False
+        escape = False
+        for i in range(start, len(text)):
+            ch = text[i]
+            if in_string:
+                if escape:
+                    escape = False
+                    continue
+                if ch == "\\":
+                    escape = True
+                    continue
+                if ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch in "{[":
+                stack.append(closer_for[ch])
+                continue
+            if ch in "}]":
+                if not stack or ch != stack[-1]:
+                    return None
+                stack.pop()
+                if not stack:
+                    return text[start : i + 1]
+        return None
 
     def _clean_probe(self, text: str) -> str:
         cleaned = text.strip().strip('"').strip("'")
