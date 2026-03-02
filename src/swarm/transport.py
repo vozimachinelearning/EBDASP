@@ -5,6 +5,7 @@ import json
 import uuid
 import time
 import os
+import random
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import RNS
@@ -525,6 +526,8 @@ class NetworkTransport(Transport):
         self._stop_event = threading.Event()
         self._last_no_interface_log = 0.0
         self._hash_mismatch_seen: Dict[str, str] = {}
+        self._connect_backoff_seconds: Dict[str, float] = {}
+        self._connect_next_attempt: Dict[str, float] = {}
         if rns_config_dir:
             RNS.Reticulum(rns_config_dir)
         else:
@@ -569,6 +572,7 @@ class NetworkTransport(Transport):
         self._destination_hash = self._destination.hash
         self._destination_hash_hex = self._destination_hash.hex()
         threading.Thread(target=self._announce_loop, daemon=True).start()
+        threading.Thread(target=self._connection_maintenance_loop, daemon=True).start()
 
     def _has_outbound_interface(self) -> bool:
         for interface in list(RNS.Transport.interfaces):
@@ -579,11 +583,67 @@ class NetworkTransport(Transport):
     def is_node_reachable(self, node_id: str) -> bool:
         if node_id in self._workers:
             return True
+        link = self._links.get(node_id)
+        if link is not None and link.status == RNS.Link.ACTIVE:
+            return True
         if not self._has_outbound_interface():
             return False
         if node_id not in self._node_identities:
             return False
-        return self._ensure_path(node_id, wait_seconds=0)
+        self._schedule_connect(node_id)
+        return False
+
+    def _schedule_connect(self, node_id: str, min_delay_seconds: float = 0.0) -> None:
+        if node_id in self._workers:
+            return
+        if node_id not in self._node_identities:
+            return
+        now = time.monotonic()
+        existing = self._connect_next_attempt.get(node_id)
+        proposed = now + max(0.0, min_delay_seconds)
+        if existing is None or proposed < existing:
+            self._connect_next_attempt[node_id] = proposed
+
+    def _connection_maintenance_loop(self) -> None:
+        while not self._stop_event.is_set():
+            if not self._has_outbound_interface():
+                time.sleep(1.0)
+                continue
+
+            now = time.monotonic()
+            peers = list(self._node_identities.keys())
+            random.shuffle(peers)
+
+            attempts = 0
+            for node_id in peers:
+                if node_id in self._workers:
+                    continue
+                link = self._links.get(node_id)
+                if link is not None and link.status == RNS.Link.ACTIVE:
+                    continue
+                if link is not None and link.status == RNS.Link.PENDING:
+                    continue
+
+                next_time = self._connect_next_attempt.get(node_id, 0.0)
+                if now < next_time:
+                    continue
+
+                attempts += 1
+                ok = self._ensure_link_active(node_id, wait_seconds=1.5, attempts=1) is not None
+                if ok:
+                    self._connect_backoff_seconds.pop(node_id, None)
+                    self._connect_next_attempt.pop(node_id, None)
+                else:
+                    backoff = self._connect_backoff_seconds.get(node_id, 0.5)
+                    backoff = min(max(0.5, backoff * 2.0), 30.0)
+                    self._connect_backoff_seconds[node_id] = backoff
+                    jitter = random.random() * min(0.25, backoff * 0.1)
+                    self._connect_next_attempt[node_id] = time.monotonic() + backoff + jitter
+
+                if attempts >= 2:
+                    break
+
+            time.sleep(0.5)
 
     def get_node_health(self, node_id: str) -> Dict[str, Any]:
         stored_hash = self._node_destinations.get(node_id)
@@ -643,8 +703,13 @@ class NetworkTransport(Transport):
             status="ok",
         )
         payload = self.protocol.encode_binary(heartbeat)
-        for remote_node_id in list(self._node_identities.keys()):
-            self._send_packet(remote_node_id, payload)
+        for remote_node_id, link in list(self._links.items()):
+            if link is None or link.status != RNS.Link.ACTIVE:
+                continue
+            try:
+                RNS.Packet(link, payload).send()
+            except Exception:
+                continue
 
     def send_query(self, node_id: str, request: QueryRequest) -> QueryResponse:
         worker = self._workers.get(node_id)
@@ -743,6 +808,11 @@ class NetworkTransport(Transport):
             
         if not self._has_outbound_interface():
             return False
+
+        link = self._links.get(node_id)
+        if link is None or link.status != RNS.Link.ACTIVE:
+            self._schedule_connect(node_id)
+            return False
             
         network_probe = ProbeQuery(
             probe_id=probe.probe_id,
@@ -760,16 +830,9 @@ class NetworkTransport(Transport):
         )
         
         payload = self.protocol.encode_binary(network_probe)
-        
-        # Async send - do not block waiting for link if possible, but we need link to send
-        # We spawn a thread to handle the send so the caller returns immediately
+
         def _send():
             try:
-                link = self._ensure_link_active(node_id, wait_seconds=2.0, attempts=2)
-                if not link:
-                    print(f"[Transport] Async probe send failed: No link to {node_id}")
-                    return
-                
                 if len(payload) > link.MDU:
                     RNS.Resource(payload, link)
                 else:
@@ -1260,7 +1323,11 @@ class NetworkTransport(Transport):
         destination_hash_bytes = bytes.fromhex(destination_hash)
         if RNS.Transport.has_path(destination_hash_bytes):
             next_hop_interface = RNS.Transport.next_hop_interface(destination_hash_bytes)
-            if next_hop_interface is not None and getattr(next_hop_interface, "OUT", False):
+            if (
+                next_hop_interface is not None
+                and getattr(next_hop_interface, "OUT", False)
+                and getattr(next_hop_interface, "online", True)
+            ):
                 return True
         RNS.Transport.request_path(destination_hash_bytes)
         if wait_seconds <= 0:
@@ -1269,7 +1336,11 @@ class NetworkTransport(Transport):
         while time.monotonic() < deadline:
             if RNS.Transport.has_path(destination_hash_bytes):
                 next_hop_interface = RNS.Transport.next_hop_interface(destination_hash_bytes)
-                if next_hop_interface is not None and getattr(next_hop_interface, "OUT", False):
+                if (
+                    next_hop_interface is not None
+                    and getattr(next_hop_interface, "OUT", False)
+                    and getattr(next_hop_interface, "online", True)
+                ):
                     return True
             time.sleep(0.1)
         return False
@@ -1407,4 +1478,8 @@ class _AnnounceHandler:
                 # Store the actual hash
                 self.transport._node_destinations[message.node_id] = actual_hash
                 self.transport._destination_to_node[actual_hash] = message.node_id
+                try:
+                    self.transport._schedule_connect(message.node_id)
+                except Exception:
+                    pass
             super(NetworkTransport, self.transport).announce(message)

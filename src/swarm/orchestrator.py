@@ -324,13 +324,27 @@ Return a valid JSON object with a single key "probes" containing a list of strin
         """
         results = []
         available_nodes = self.transport.available_nodes()
-        
-        # Ensure we use ALL nodes: remote ones + local self
-        # Use a set to avoid duplicates if self is somehow in available_nodes
-        candidates = list(set(available_nodes + [self.transport.node_id]))
-        
-        # Filter reachable nodes to ensure we don't send to unreachable peers
-        all_workers = self.transport.filter_reachable_nodes(candidates)
+
+        local_workers = list(getattr(self.transport, "_workers", {}).keys())
+        candidates: List[str] = []
+        for node_id in list(available_nodes) + list(local_workers) + [self.transport.node_id]:
+            if node_id not in candidates:
+                candidates.append(node_id)
+
+        if hasattr(self.transport, "filter_reachable_nodes"):
+            all_workers = self.transport.filter_reachable_nodes(candidates)
+        else:
+            all_workers = candidates
+
+        remote_candidates = [nid for nid in candidates if nid not in local_workers and nid != self.transport.node_id]
+        if remote_candidates and not any(nid in all_workers for nid in remote_candidates) and hasattr(self.transport, "filter_reachable_nodes"):
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                time.sleep(0.2)
+                refreshed = self.transport.filter_reachable_nodes(candidates)
+                if any(nid in refreshed for nid in remote_candidates):
+                    all_workers = refreshed
+                    break
         
         if len(all_workers) < len(candidates):
             skipped = set(candidates) - set(all_workers)
@@ -347,6 +361,10 @@ Return a valid JSON object with a single key "probes" containing a list of strin
         # This ensures we don't just hammer one random node, but spread the load
         # and utilize the full network width.
         worker_index = 0
+
+        if not all_workers:
+            print("[Orchestrator] No reachable workers available for probe dispatch")
+            return []
         
         for probe_text in probes:
             # Pick node round-robin
@@ -461,20 +479,22 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             print(f"[Orchestrator] Iteration {i+1}/{max_iterations}")
             
             # 1. Try to Answer (Check for sufficiency)
-            # We use _attempt_answer to check if we have enough info to form a conclusion,
-            # but we won't use its output as the FINAL answer directly if the user wants a long report.
-            short_answer = self._attempt_answer(original_question, historical_information)
-            step_answers.append({"step": i+1, "answer": short_answer, "history_len": len(historical_information)})
-            
-            if short_answer != "*" and short_answer != "Could not determine a final answer." and len(short_answer) > 10:
-                 print(f"[Orchestrator] Sufficient information found. Synthesizing long answer...")
-                 final_answer = self._synthesize_long_answer(original_question, historical_information)
-                 return {
-                    "original_question": original_question,
-                    "final_answer": final_answer,
-                    "iterations": i+1,
-                    "history": step_answers
-                 }
+            # We use _attempt_answer to check if we have enough info to form a conclusion.
+            if i > 0:
+                short_answer = self._attempt_answer(original_question, historical_information)
+                step_answers.append({"step": i+1, "answer": short_answer, "history_len": len(historical_information)})
+                
+                if short_answer != "*" and short_answer != "Could not determine a final answer." and len(short_answer) > 10:
+                     print(f"[Orchestrator] Sufficient information found. Synthesizing long answer...")
+                     final_answer = self._synthesize_long_answer(original_question, historical_information)
+                     return {
+                        "original_question": original_question,
+                        "final_answer": final_answer,
+                        "iterations": i+1,
+                        "history": step_answers
+                     }
+            else:
+                print(f"[Orchestrator] Iteration 1: Skipping early answer check to force swarm probe distribution.")
             
             # 2. Generate Probes
             new_probes = self._generate_comorag_probes(original_question, historical_information, previous_probes)
@@ -672,6 +692,11 @@ Return a concise updated context that preserves the goal and removes unrelated c
             reachable_remote = remote_nodes
             if hasattr(self.transport, "filter_reachable_nodes"):
                 reachable_remote = self.transport.filter_reachable_nodes(remote_nodes)
+                if remote_nodes and not reachable_remote:
+                    deadline = time.monotonic() + 2.0
+                    while time.monotonic() < deadline and not reachable_remote:
+                        time.sleep(0.2)
+                        reachable_remote = self.transport.filter_reachable_nodes(remote_nodes)
             if reachable_remote:
                 distribution_pool = reachable_remote
             else:
