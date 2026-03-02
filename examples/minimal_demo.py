@@ -32,37 +32,6 @@ class DemoWorker(Worker):
         self.node_id = node_id
         self.domain = domain
 
-    def handle_query(self, request: QueryRequest) -> QueryResponse:
-        claim = f"{self.node_id} responde sobre {request.question}"
-        evidence = [
-            EvidenceChunk(
-                chunk_id=str(uuid.uuid4()),
-                content_hash="hash",
-                text=f"Evidencia de {self.node_id} para {request.question}",
-                source=self.node_id,
-                timestamp="2026-02-25T00:00:00Z",
-                signature="firma",
-            )
-        ]
-        next_queries = []
-        if request.recursion_budget > 0:
-            next_queries.append(
-                QueryRequest(
-                    query_id=str(uuid.uuid4()),
-                    question=f"{request.question} ({self.domain})",
-                    domain=self.domain,
-                    recursion_budget=request.recursion_budget - 1,
-                    constraints=request.constraints,
-                )
-            )
-        return QueryResponse(
-            query_id=request.query_id,
-            claims=[claim],
-            evidence=evidence,
-            confidence=0.6,
-            next_queries=next_queries,
-        )
-
 
 class ConsoleRedirector:
     def __init__(self, rich_log: RichLog, log_file: Optional[str] = None) -> None:
@@ -707,14 +676,29 @@ def main() -> None:
         transport = NetworkTransport(node_id=node_id, protocol=protocol, rns_config_dir=rns_config_dir)
         prompt = f"swarm[{node_id}]> "
         
-        # Interface check
+        # Interface check with retry logic
+        print("Checking for Reticulum interfaces...")
         interfaces = transport.interface_status()
+        retries = 5
+        while not any(iface.get('out') for iface in interfaces) and retries > 0:
+            print(f"Waiting for outbound interfaces... ({retries} retries left)")
+            time.sleep(2)
+            interfaces = transport.interface_status()
+            retries -= 1
+            
         print(f"Reticulum interfaces detected: {len(interfaces)}")
         for iface in interfaces:
-            status = "Online" if iface['online'] else "Offline"
+            status = "Online" if iface.get('online') else "Offline"
             print(f" - {iface['name']} ({iface['type']}): {status}, IN={iface['in']}, OUT={iface['out']}")
-        if not any(iface['out'] for iface in interfaces):
-            print("WARNING: No outbound interfaces available! 'No interfaces could process the outbound packet' error is likely.")
+            
+        if not any(iface.get('out') for iface in interfaces):
+            print("\n" + "="*60)
+            print("CRITICAL ERROR: No outbound interfaces available!")
+            print("This node will be ISOLATED. Network mode requires at least one outbound interface.")
+            print("Please configure your Reticulum config file (usually ~/.reticulum/config) with an AutoInterface or other transport.")
+            print("="*60 + "\n")
+            # Enforce availability by exiting
+            sys.exit(1)
             
     else:
         transport = Transport(node_id="coordinator")

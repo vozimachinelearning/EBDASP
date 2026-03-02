@@ -42,6 +42,8 @@ class Transport:
         self._activity_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         self._completion_ledger: Dict[str, Dict[str, Any]] = {}
         self._lock = threading.RLock()
+        self._evidence_buffer: List[EvidenceChunk] = []
+        self._evidence_lock = threading.Lock()
         self._context_chunk_buffer: Dict[str, Dict[str, Any]] = {}
         self._max_context_chunk_size = 8000
 
@@ -163,6 +165,53 @@ class Transport:
         )
         return response
 
+    def send_probe_async(self, node_id: str, probe: ProbeQuery) -> bool:
+        worker = self._workers.get(node_id)
+        if worker is not None:
+            return super().send_probe_async(node_id, probe)
+            
+        if node_id not in self._node_identities:
+            return False
+            
+        if not self._has_outbound_interface():
+            return False
+            
+        network_probe = ProbeQuery(
+            probe_id=probe.probe_id,
+            original_question=probe.original_question,
+            probe_text=probe.probe_text,
+            iteration=probe.iteration,
+            global_memory_summary=probe.global_memory_summary,
+            timestamp=probe.timestamp,
+            signature=probe.signature,
+            domain=probe.domain,
+            target_node_id=node_id,
+            sender_node_id=self.node_id,
+            sender_hash=self._destination_hash_hex,
+            previous_probes=probe.previous_probes,
+        )
+        
+        payload = self.protocol.encode_binary(network_probe)
+        
+        # Async send - do not block waiting for link if possible, but we need link to send
+        # We spawn a thread to handle the send so the caller returns immediately
+        def _send():
+            try:
+                link = self._ensure_link_active(node_id, wait_seconds=2.0, attempts=2)
+                if not link:
+                    print(f"[Transport] Async probe send failed: No link to {node_id}")
+                    return
+                
+                if len(payload) > link.MDU:
+                    RNS.Resource(payload, link)
+                else:
+                    RNS.Packet(link, payload).send()
+            except Exception as e:
+                print(f"[Transport] Async probe send error: {e}")
+                
+        threading.Thread(target=_send, daemon=True).start()
+        return True
+
     def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
         print(f"[Transport] Sending Task {assignment.task.task_id} to {node_id}")
         worker = self._workers.get(node_id)
@@ -192,6 +241,40 @@ class Transport:
             },
         )
         return response
+
+    def send_probe_async(self, node_id: str, probe: ProbeQuery) -> bool:
+        worker = self._workers.get(node_id)
+        if worker is None:
+            return False
+        # Local execution for async probe
+        def _run_local():
+            try:
+                response = worker.handle_probe(probe)
+                with self._evidence_lock:
+                    self._evidence_buffer.append(response)
+            except Exception as e:
+                print(f"[Transport] Local probe async execution failed: {e}")
+        
+        threading.Thread(target=_run_local, daemon=True).start()
+        return True
+
+    def pop_evidence(self, probe_ids: List[str]) -> List[EvidenceChunk]:
+        """
+        Retrieves and removes EvidenceChunk messages from the buffer that match the given probe_ids.
+        """
+        results = []
+        remaining = []
+        target_ids = set(probe_ids)
+        
+        with self._evidence_lock:
+            for ev in self._evidence_buffer:
+                if ev.probe_id in target_ids:
+                    results.append(ev)
+                else:
+                    remaining.append(ev)
+            self._evidence_buffer = remaining
+            
+        return results
 
     def send_global_memory_update(self, node_id: str, update: GlobalMemoryUpdate) -> bool:
         worker = self._workers.get(node_id)
@@ -924,14 +1007,14 @@ class NetworkTransport(Transport):
                  message = self.protocol.decode_compact(data)
              except Exception:
                  return
-        self._handle_message(message)
+        self._handle_message(message, link=packet.link)
 
     def _on_resource_concluded(self, resource: RNS.Resource) -> None:
         if resource.status == RNS.Resource.COMPLETE:
              try:
                  data = resource.data.read()
                  message = self.protocol.decode_binary(data)
-                 self._handle_message(message)
+                 self._handle_message(message, link=resource.link)
              except Exception as e:
                  print(f"[Transport] Failed to decode resource data: {e}")
 
@@ -964,7 +1047,7 @@ class NetworkTransport(Transport):
 
         self._handle_message(message)
 
-    def _handle_message(self, message: Any) -> None:
+    def _handle_message(self, message: Any, link: Optional[RNS.Link] = None) -> None:
         if isinstance(message, Heartbeat):
             self._last_seen[message.node_id] = self._time_provider()
             self.emit_activity("heartbeat", node_id=message.node_id, payload={})
@@ -981,8 +1064,21 @@ class NetworkTransport(Transport):
             response = worker.handle_query(message)
             reply_to = message.constraints.get("reply_to")
             reply_to_node_id = message.constraints.get("reply_to_node_id")
+            
+            payload = self.protocol.encode_binary(response)
+            
+            # Prefer using the existing link if available
+            if link and link.status == RNS.Link.ACTIVE:
+                 try:
+                     if len(payload) > link.MDU:
+                         RNS.Resource(payload, link)
+                     else:
+                         RNS.Packet(link, payload).send()
+                     return
+                 except Exception:
+                     pass
+
             if reply_to_node_id or reply_to:
-                payload = self.protocol.encode_binary(response)
                 if reply_to_node_id and reply_to_node_id in self._node_identities:
                     self._send_payload(reply_to_node_id, payload)
                 elif reply_to and reply_to in self._destination_to_node:
@@ -997,13 +1093,32 @@ class NetworkTransport(Transport):
                 worker = next(iter(self._workers.values()))
             if worker is None:
                 return
+            print(f"[Transport] Processing ProbeQuery {message.probe_id} from {message.sender_node_id}")
             response = worker.handle_probe(message)
             payload = self.protocol.encode_binary(response)
+            
+            # Prefer using the existing link if available
+            if link and link.status == RNS.Link.ACTIVE:
+                 print(f"[Transport] Sending EvidenceChunk via existing link to {message.sender_node_id}")
+                 try:
+                     if len(payload) > link.MDU:
+                         RNS.Resource(payload, link)
+                     else:
+                         RNS.Packet(link, payload).send()
+                     return
+                 except Exception as e:
+                     print(f"[Transport] Failed to send response via link: {e}")
+
             reply_to_node_id = message.sender_node_id
             if reply_to_node_id and reply_to_node_id in self._node_identities:
+                print(f"[Transport] Sending EvidenceChunk via new/cached path to {reply_to_node_id}")
                 self._send_payload(reply_to_node_id, payload)
             elif message.sender_hash and message.sender_hash in self._destination_to_node:
-                self._send_payload(self._destination_to_node[message.sender_hash], payload)
+                node_id = self._destination_to_node[message.sender_hash]
+                print(f"[Transport] Sending EvidenceChunk via destination hash to {node_id}")
+                self._send_payload(node_id, payload)
+            else:
+                print(f"[Transport] Could not send EvidenceChunk: Unknown sender {reply_to_node_id}")
             return
         if isinstance(message, TaskAssignment):
             worker = None
@@ -1018,6 +1133,18 @@ class NetworkTransport(Transport):
                 # Send result back
                 payload = self.protocol.encode_binary(result)
                 
+                # Prefer using the existing link if available
+                if link and link.status == RNS.Link.ACTIVE:
+                     print(f"[Transport] Sending TaskResult via existing link")
+                     try:
+                         if len(payload) > link.MDU:
+                             RNS.Resource(payload, link)
+                         else:
+                             RNS.Packet(link, payload).send()
+                         return
+                     except Exception:
+                         pass
+
                 target_node_id = message.sender_node_id
                 if target_node_id:
                     link = self._ensure_link_active(target_node_id, wait_seconds=1.5, attempts=2)
@@ -1059,10 +1186,15 @@ class NetworkTransport(Transport):
             if probe_id:
                 with self._pending_lock:
                     event = self._pending_events.get(probe_id)
-                    if event is None:
+                    if event:
+                        self._pending_responses[probe_id] = message
+                        event.set()
                         return
-                    self._pending_responses[probe_id] = message
-                    event.set()
+                
+                # If no pending event, it might be an async probe response
+                with self._evidence_lock:
+                    self._evidence_buffer.append(message)
+                    print(f"[Transport] EvidenceChunk {probe_id} buffered (async)")
             return
 
         if isinstance(message, QueryResponse):

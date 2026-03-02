@@ -1,4 +1,4 @@
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Dict, List, Optional
 
 
@@ -116,14 +116,13 @@ class ProbeQuery(Message):
     probe_id: str
     original_question: str
     probe_text: str
-    iteration: int
-    global_memory_summary: Optional[str]
-    timestamp: str
-    signature: str
-    domain: Optional[str] = None
-    target_node_id: Optional[str] = None
+    global_memory_summary: str
+    previous_probes: List[str] = field(default_factory=list)
     sender_node_id: Optional[str] = None
+    target_node_id: Optional[str] = None
     sender_hash: Optional[str] = None
+    timestamp: Optional[str] = None
+    signature: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)

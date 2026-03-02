@@ -200,10 +200,12 @@ class Orchestrator:
             if probes:
                 return probes[:max_items]
         prompt = f"""
-Basado en la pregunta original y el contexto consolidado, genera hasta {max_items} sondas concretas.
-Pregunta original: {original_question}
-Contexto consolidado: {consolidated_context}
-Devuelve un JSON con la clave probes (lista de strings).
+Based on the original question and the current consolidated context, generate up to {max_items} specific, targeted probe questions to gather missing information.
+
+Original Question: {original_question}
+Consolidated Context: {consolidated_context}
+
+Return a valid JSON object with a single key "probes" containing a list of strings.
 """
         response = self.llm_engine.generate(prompt, max_new_tokens=256, temperature=0.3)
         parsed = self._safe_json(response)
@@ -231,182 +233,245 @@ Devuelve un JSON con la clave probes (lista de strings).
                 flattened.append(chunk)
         return flattened
 
-    def consolidate_evidence(self, evidence_list: List[EvidenceChunk], current_state: Dict[str, Any]) -> Dict[str, Any]:
-        flattened = self._flatten_evidence(evidence_list)
-        original_question = current_state.get("original_question", "")
-        if not flattened:
-            return {
-                "consolidated_context": current_state.get("global_memory_pool", ""),
-                "key_entities": current_state.get("key_entities", []),
-                "open_questions": current_state.get("open_questions", []) or [original_question],
-            }
-        evidence_text = "\n".join([self._compact_text(str(item.get("text", "")), limit=600) for item in flattened])
-        if not self.llm_engine or len(evidence_text.split()) < 120:
-            consolidated_context = evidence_text
-            return {
-                "consolidated_context": consolidated_context,
-                "key_entities": current_state.get("key_entities", []),
-                "open_questions": current_state.get("open_questions", []),
-            }
-        prompt = f"""
-Resume los siguientes fragmentos en un contexto coherente.
-Extrae entidades clave y preguntas abiertas.
-Pregunta original: {original_question}
-Fragmentos:
-{evidence_text}
-Devuelve JSON con claves: consolidated_context, key_entities, open_questions.
-"""
-        response = self.llm_engine.generate(prompt, max_new_tokens=512, temperature=0.2)
+    def _attempt_answer(self, question: str, context: str) -> str:
+        """
+        Tries to answer the question using the RAG QA Narrative prompt.
+        Returns "*" if the answer cannot be determined.
+        """
+        if not self.llm_engine:
+            return "*"
+            
+        rag_qa_system = (
+            "### Role\n"
+            "You are an expert at carefully reading complex texts, extracting narrative details, and making logical inferences.\n\n"
+            "### Task\n"
+            "Given the following detail article from a book, and a related question, you need to provide a accurate answer based on the given information.Use the shortest possible answer taken from the text.\n\n"
+            "### Detail Article\n"
+            "{context}\n\n"
+            "### question\n"
+            "{question}\n\n"
+            "### Response Format\n"
+            "0. All numbers must be written in English words for example twenty-three instead of twenty-three. Do not output approximations inequalities or ranges Give an exact answer from the text if available\n"
+            "1. Start with a very brief understanding of the content in no more than two sentences. Begin this section with \"### Content Understanding\"\n"
+            "2. Identify and analyze all plausibly relevant information from the content. Use a short markdown list. Avoid adding anything not in the text. Begin this section with \"### Relevant Information Analysis\"\n"
+            "3. From that, extract only the key facts that directly answer the question. Use a concise markdown list. Begin this section with \"### Key Facts\"\n"
+            "4. Add your final answer in the format \"### Final Answer.\" Use the shortest possible answer taken from the text. If there isn't enough information, just write \"*\"\n"
+        )
+        
+        prompt = rag_qa_system.format(context=context, question=question)
+        response = self.llm_engine.generate(prompt, max_new_tokens=1024, temperature=0.1)
+        
+        try:
+            if "### Final Answer" in response:
+                final_answer = response.split("### Final Answer")[1].strip()
+                # Clean up punctuation if it's just "*"
+                if final_answer.startswith("*"):
+                    return "*"
+                return final_answer
+            return "*" # Fallback if format broken
+        except Exception:
+            return "*"
+
+    def _generate_comorag_probes(self, query: str, context: str, previous_probes: List[str]) -> List[str]:
+        """
+        Generates diverse retrieval probes using the ComoRAG prompt.
+        """
+        if not self.llm_engine:
+            return []
+            
+        probe_generator_system = (
+            "### Role\n"
+            "You are an expert in multi-turn retrieval-oriented probe generation. Your job is to extract diverse and complementary retrieval probes from queries to broaden and enrich subsequent corpus search results.\n\n"
+            "### Input Materials\n"
+            "You will be provided with:\n"
+            "1. **Original Query**: A question or information need that requires comprehensive information retrieval.\n"
+            "2. **Context**: Available background information, partial content, or relevant summaries.\n"
+            "3. **Previous probes**: Previously generated probes from earlier iterations (if any).\n\n"
+            "### Task\n"
+            "Based on the query and context, generate **up to 3 non-overlapping retrieval probes** that explore the query from distinct angles.\n\n"
+            "**Critical Requirements:**\n"
+            "- **Entity Priority Principle**: Prioritize generating probes targeting specific entities (people, objects, locations) not covered by previous probes\n"
+            "- **Semantic Differentiation**: Ensure new probes are semantically distinct from any previous probes provided\n"
+            "- **Complementary Coverage**: New probes should cover different information dimensions not addressed by previous probes\n"
+            "- **Relevance Maintenance**: All probes must remain directly relevant to answering the original query\n\n"
+            "### Output Format\n"
+            "{\n"
+            " \"probe_1\": \"Content of probe 1\",\n"
+            " \"probe_2\": \"Content of probe 2\",\n"
+            " \"probe_3\": \"Content of probe 3\"\n"
+            "}\n"
+        )
+        
+        prev_probes_str = "\n".join(previous_probes) if previous_probes else "None"
+        user_content = f"Original Query:\n{query}\n\nContext:\n{context}\n\nPrevious probes:\n{prev_probes_str}\n\nYour Response: "
+        
+        full_prompt = f"{probe_generator_system}\n\n{user_content}"
+        
+        response = self.llm_engine.generate(full_prompt, max_new_tokens=512, temperature=0.3)
+        
         parsed = self._safe_json(response)
         if isinstance(parsed, dict):
-            consolidated_context = str(parsed.get("consolidated_context", "")).strip()
-            key_entities = parsed.get("key_entities") if isinstance(parsed.get("key_entities"), list) else []
-            open_questions = parsed.get("open_questions") if isinstance(parsed.get("open_questions"), list) else []
-            return {
-                "consolidated_context": consolidated_context or evidence_text,
-                "key_entities": [str(item).strip() for item in key_entities if str(item).strip()],
-                "open_questions": [str(item).strip() for item in open_questions if str(item).strip()],
-            }
-        return {
-            "consolidated_context": evidence_text,
-            "key_entities": current_state.get("key_entities", []),
-            "open_questions": current_state.get("open_questions", []),
-        }
+            probes = []
+            for k, v in parsed.items():
+                if k.startswith("probe_") and isinstance(v, str) and v.strip():
+                    probes.append(v.strip())
+            return probes
+        return []
 
-    def run_reasoning_cycle(self, original_question: str, max_iterations: Optional[int] = None, domain: Optional[str] = None) -> Dict[str, Any]:
+    def _dispatch_probes(self, probes: List[str], original_question: str, global_summary: str, previous_probes: List[str]) -> List[EvidenceChunk]:
+        """
+        Dispatches probes to workers and collects results using async transport and polling.
+        """
+        results = []
+        available_nodes = self.transport.available_nodes()
+        if not available_nodes:
+            # If no other nodes, use self if possible (or just fail if strictly distributed)
+            # But transport.available_nodes() usually excludes self? No, it returns announcements.
+            # If empty, maybe we are the only one?
+            available_nodes = [self.transport.node_id]
+
+        import random
+        
+        pending_probe_ids = []
+        probe_map = {} # id -> text
+        
+        for probe_text in probes:
+            # Simple load balancing: pick random node
+            target_node = random.choice(available_nodes)
+            probe_id = str(uuid.uuid4())
+            
+            msg = ProbeQuery(
+                probe_id=probe_id,
+                original_question=original_question,
+                probe_text=probe_text,
+                global_memory_summary=global_summary,
+                previous_probes=previous_probes,
+                sender_node_id=self.transport.node_id,
+                target_node_id=target_node,
+                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            )
+            
+            print(f"[Orchestrator] Dispatching probe '{probe_text}' to {target_node}")
+            if self.transport.send_probe_async(target_node, msg):
+                pending_probe_ids.append(probe_id)
+                probe_map[probe_id] = probe_text
+            else:
+                print(f"[Orchestrator] Failed to dispatch probe to {target_node}")
+
+        if not pending_probe_ids:
+            return []
+
+        # Poll for results
+        # Wait up to 15 seconds (adjust based on network latency)
+        start_time = time.time()
+        collected_ids = set()
+        
+        while time.time() - start_time < 15.0:
+            # Get any new evidence
+            # We need to pass the IDs we are looking for
+            # But pop_evidence removes them, so we just ask for all pending
+            # that haven't been collected yet
+            remaining_ids = [pid for pid in pending_probe_ids if pid not in collected_ids]
+            if not remaining_ids:
+                break
+                
+            batch = self.transport.pop_evidence(remaining_ids)
+            if batch:
+                for ev in batch:
+                    if ev.probe_id in pending_probe_ids and ev.probe_id not in collected_ids:
+                        results.append(ev)
+                        collected_ids.add(ev.probe_id)
+            
+            if len(collected_ids) == len(pending_probe_ids):
+                break
+                
+            time.sleep(0.5)
+            
+        print(f"[Orchestrator] Collected {len(results)}/{len(pending_probe_ids)} probe responses")
+        return results
+
+    def _synthesize_long_answer(self, question: str, context: str) -> str:
         if not self.llm_engine:
-            raise RuntimeError("LLMEngine is required for reasoning cycle.")
-        iterations = max_iterations or int(os.getenv("MAX_REASONING_ITERATIONS", "5"))
-        probe_strategy = os.getenv("PROBE_STRATEGY", "default").lower()
-        evidence_limit = int(os.getenv("EVIDENCE_LIMIT_PER_WORKER", "5"))
-        global_memory_frequency = int(os.getenv("GLOBAL_MEMORY_UPDATE_FREQUENCY", "1"))
-        context_id = str(uuid.uuid4())
-        state: Dict[str, Any] = {
-            "original_question": original_question,
-            "iteration_history": [],
-            "global_memory_pool": "",
-            "key_entities": [],
-            "open_questions": [original_question],
-        }
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "logs")
-        try:
-            os.makedirs(log_dir, exist_ok=True)
-        except Exception:
-            pass
-        log_path = os.path.join(log_dir, f"reasoning_cycle_{int(time.time())}.json")
-        for iteration in range(1, iterations + 1):
-            max_probes = max(2, min(6, evidence_limit))
-            probes = self._generate_probe_queries(
-                original_question,
-                state.get("global_memory_pool", ""),
-                state.get("open_questions", []),
-                max_items=max_probes,
-            )
-            if probe_strategy == "question_decomposition" and state.get("open_questions"):
-                probes = state.get("open_questions", [])[:max_probes]
-            if not probes:
-                probes = [original_question]
-            available_nodes = self.transport.available_nodes(domain=domain)
-            for worker_id in list(self.transport._workers.keys()):
-                if worker_id not in available_nodes:
-                    available_nodes.append(worker_id)
-            evidence_list: List[EvidenceChunk] = []
-            threads = []
-            lock = threading.Lock()
+            return "LLM Engine not available."
+            
+        prompt = f"""
+### Role
+You are an expert analyst and technical writer.
 
-            def dispatch(node_id: str, probe_text: str) -> None:
-                try:
-                    probe = ProbeQuery(
-                        probe_id=str(uuid.uuid4()),
-                        original_question=original_question,
-                        probe_text=probe_text,
-                        iteration=iteration,
-                        global_memory_summary=state.get("global_memory_pool", ""),
-                        timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                        signature="",
-                        domain=domain,
-                        target_node_id=node_id,
-                        sender_node_id=self.transport.node_id,
-                        sender_hash=getattr(self.transport, "_destination_hash_hex", None),
-                    )
-                    response = self.transport.send_probe(node_id, probe)
-                    with lock:
-                        evidence_list.append(response)
-                except Exception:
-                    return
+### Task
+Provide a comprehensive, detailed, and long-form answer to the question based on the provided context.
+The answer should be well-structured, multi-paragraph, and cover all aspects of the question using the evidence gathered.
 
-            if available_nodes:
-                for index, probe_text in enumerate(probes):
-                    node_id = available_nodes[index % len(available_nodes)]
-                    t = threading.Thread(target=dispatch, args=(node_id, probe_text))
-                    threads.append(t)
-                    t.start()
-                for t in threads:
-                    t.join()
+### Question
+{question}
 
-            consolidation = self.consolidate_evidence(evidence_list, state)
-            consolidated_context = consolidation.get("consolidated_context", "") or state.get("global_memory_pool", "")
-            key_entities = self._dedupe_items(state.get("key_entities", []) + consolidation.get("key_entities", []))
-            open_questions = self._dedupe_items(consolidation.get("open_questions", []))
-            state["global_memory_pool"] = consolidated_context
-            state["key_entities"] = key_entities
-            state["open_questions"] = open_questions
-            iteration_payload = {
-                "iteration": iteration,
-                "probes": probes,
-                "evidence_received": [item.to_dict() for item in evidence_list],
-                "consolidated_context": consolidated_context,
-                "key_entities": key_entities,
-                "open_questions": open_questions,
-            }
-            state["iteration_history"].append(iteration_payload)
-            if self.coordinator.store:
-                self.coordinator.store.add_memory(
-                    text=consolidated_context,
-                    source=self.transport.node_id,
-                    tags=["global_memory", f"context_id:{context_id}", f"iteration:{iteration}"],
-                )
-            if iteration % global_memory_frequency == 0:
-                update = GlobalMemoryUpdate(
-                    iteration=iteration,
-                    consolidated_context=consolidated_context,
-                    key_entities=key_entities,
-                    open_questions=open_questions,
-                    vector_store_snapshot=None,
-                    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    context_id=context_id,
-                )
-                for node_id in available_nodes:
-                    self.transport.send_global_memory_update(node_id, update)
-            try:
-                with open(log_path, "a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(iteration_payload, ensure_ascii=False) + "\n")
-            except Exception:
-                pass
-        final_prompt = f"""
-Responde a la pregunta original usando el contexto consolidado.
-Pregunta: {original_question}
-Contexto consolidado: {state.get("global_memory_pool", "")}
-Entidades clave: {json.dumps(state.get("key_entities", []), ensure_ascii=False)}
+### Consolidated Context
+{context}
+
+### Instructions
+1. Write a cohesive narrative.
+2. Use specific details from the context.
+3. Do NOT provide a short summary. Provide a full explanation.
+4. Format as Markdown.
 """
-        final_answer = self.llm_engine.generate(final_prompt, max_new_tokens=900, temperature=0.3)
-        if self._looks_like_json(final_answer):
-            rewrite_prompt = f"""
-Reescribe el contenido como una respuesta extensa y natural.
-Contenido:
-{final_answer}
-"""
-            final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=900, temperature=0.3)
-        if self.coordinator.store:
-            self.coordinator.store.add_memory(
-                text=f"Q: {original_question}\nA: {final_answer}",
-                source=self.transport.node_id,
-                tags=["final_answer", f"context_id:{context_id}"],
-            )
+        return self.llm_engine.generate(prompt, max_new_tokens=2048, temperature=0.5)
+
+    def run_reasoning_cycle(self, original_question: str, max_iterations: int = 5, domain: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Executes the ComoRAG Meta-Control Loop.
+        """
+        if not self.llm_engine:
+             raise RuntimeError("LLMEngine is required for reasoning cycle.")
+
+        print(f"[Orchestrator] Starting ComoRAG Reasoning Cycle for: {original_question}")
+        
+        historical_information = ""
+        previous_probes = []
+        step_answers = []
+        
+        for i in range(max_iterations):
+            print(f"[Orchestrator] Iteration {i+1}/{max_iterations}")
+            
+            # 1. Try to Answer (Check for sufficiency)
+            # We use _attempt_answer to check if we have enough info to form a conclusion,
+            # but we won't use its output as the FINAL answer directly if the user wants a long report.
+            short_answer = self._attempt_answer(original_question, historical_information)
+            step_answers.append({"step": i+1, "answer": short_answer, "history_len": len(historical_information)})
+            
+            if short_answer != "*" and short_answer != "Could not determine a final answer." and len(short_answer) > 10:
+                 print(f"[Orchestrator] Sufficient information found. Synthesizing long answer...")
+                 final_answer = self._synthesize_long_answer(original_question, historical_information)
+                 return {
+                    "original_question": original_question,
+                    "final_answer": final_answer,
+                    "iterations": i+1,
+                    "history": step_answers
+                 }
+            
+            # 2. Generate Probes
+            new_probes = self._generate_comorag_probes(original_question, historical_information, previous_probes)
+            if not new_probes:
+                print("[Orchestrator] No new probes. Stopping.")
+                break
+            
+            previous_probes.extend(new_probes)
+            
+            # 3. Dispatch & Collect
+            collected_evidence = self._dispatch_probes(new_probes, original_question, historical_information, previous_probes)
+            
+            # 4. Consolidate
+            for ev in collected_evidence:
+                finding = ev.fused_insight or ev.worker_insight or "No insight provided."
+                historical_information += f"\nFinding from Node {ev.worker_id}: {finding}\n"
+
+        # Final attempt if loop finishes
+        print(f"[Orchestrator] Max iterations reached. Synthesizing final answer...")
+        final_answer = self._synthesize_long_answer(original_question, historical_information)
         return {
-            "original_request": original_question,
+            "original_question": original_question,
             "final_answer": final_answer,
-            "state": state,
+            "iterations": max_iterations,
+            "history": step_answers
         }
 
     def decompose_and_distribute(self, question: str, max_cycles: int = 2, golden_answers: Optional[List[str]] = None) -> Dict[str, Any]:

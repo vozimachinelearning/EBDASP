@@ -74,19 +74,67 @@ class Worker:
                         },
                     }
                 )
+        
+        fused_insight = None
         worker_insight = None
-        if self.llm_engine and chunks:
-            prompt = (
-                f"Pregunta: {probe_query.probe_text}\n"
-                f"Fragmentos:\n{json.dumps([c['text'] for c in chunks], ensure_ascii=False)}\n"
-                "Resume en una sola frase por qué estos fragmentos ayudan a responder."
+        
+        if self.llm_engine:
+            # ComoRAG Memory Fusion Logic
+            # We use the exact prompt from ComoRAG to fuse local evidence into structured Key Findings.
+            
+            evidence_text = json.dumps([c['text'] for c in chunks], ensure_ascii=False) if chunks else "No local evidence found."
+            
+            pool_system_prompt = (
+                "###Role\n"
+                "You are an expert narrative analyst capable of identifying, extracting, and analyzing key information from narrative texts to provide accurate and targeted answers to specific questions.\n\n"
+                "###Material\n"
+                "You are given the following:\n"
+                "1. A specific question that needs to be answered\n"
+                "2. Content: Direct excerpts, facts, and specific information from the narrative text\n\n"
+                "###Task\n"
+                "1. Carefully analyze the question to identify:\n"
+                "- What type of information is being asked (character actions, locations, objects, events, motivations, etc.)\n"
+                "- Which narrative elements are relevant to answering it\n"
+                "- The specific details that need to be extracted\n\n"
+                "2. Systematically scan the content for:\n"
+                "- Direct mentions of relevant elements (names, places, objects, events)\n"
+                "- Contextual clues that help answer the question\n"
+                "- Temporal and spatial relationships\n"
+                "- Cause-and-effect connections\n\n"
+                "3. Analyze the identified information considering:\n"
+                "- Explicit statements (directly stated facts)\n"
+                "- Implicit information (suggested through context, dialogue, or narrative)\n"
+                "- Logical connections between different narrative elements\n"
+                "- Chronological sequence of events if relevant\n\n"
+                "4. Synthesize findings to construct a precise answer to the question.\n\n"
+                "###Response Format\n"
+                "Provide a structured analysis with up to 5 key findings:\n\n"
+                "- Key Finding: <Most directly relevant information answering the question>\n"
+                "- Key Finding: <Supporting evidence or context>\n"
+                "- Key Finding: <Additional relevant details>\n"
+                "- Key Finding: <Clarifying information if needed>\n"
+                "- Key Finding: <Resolution of any ambiguities>\n"
             )
-            worker_insight = self.llm_engine.generate(prompt, max_new_tokens=96, temperature=0.3)
+            
+            user_content = f"Questions:\n{probe_query.probe_text}\n\nContent:\n{evidence_text}\n\nYour Response: "
+            
+            # Combine for LLM generation
+            full_prompt = f"{pool_system_prompt}\n\n{user_content}"
+            
+            # Generate the fused insight
+            # Using a higher token limit as requested for "hundreds of tokens"
+            fused_insight = self.llm_engine.generate(full_prompt, max_new_tokens=1024, temperature=0.3)
+            
+            # For backward compatibility or if needed, we can also keep a simple insight, 
+            # but fused_insight is the primary ComoRAG output.
+            worker_insight = fused_insight 
+
         evidence = EvidenceChunk(
             probe_id=probe_query.probe_id,
             worker_id=self.transport.node_id,
             chunks=chunks,
             worker_insight=worker_insight,
+            fused_insight=fused_insight,
             timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             signature="",
         )
