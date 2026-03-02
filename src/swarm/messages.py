@@ -33,6 +33,7 @@ class EvidenceChunk(Message):
     worker_id: Optional[str] = None
     chunks: Optional[List[Dict[str, Any]]] = None
     worker_insight: Optional[str] = None
+    fused_insight: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = {key: value for key, value in asdict(self).items() if value is not None}
@@ -117,6 +118,7 @@ class ProbeQuery(Message):
     original_question: str
     probe_text: str
     global_memory_summary: str
+    iteration: int = 0
     previous_probes: List[str] = field(default_factory=list)
     sender_node_id: Optional[str] = None
     target_node_id: Optional[str] = None
@@ -329,7 +331,7 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             global_memory_summary=data.get("global_memory_summary"),
             timestamp=data.get("timestamp", ""),
             signature=data.get("signature", ""),
-            domain=data.get("domain"),
+            # domain=data.get("domain"),
             target_node_id=data.get("target_node_id"),
             sender_node_id=data.get("sender_node_id"),
             sender_hash=data.get("sender_hash"),

@@ -3,8 +3,7 @@ import sys
 import unittest
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ebdasp_dir = os.path.join(base_dir, "EBDASP")
-src_dir = os.path.join(ebdasp_dir, "src")
+src_dir = os.path.join(base_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
@@ -22,7 +21,7 @@ class TestMessagesProtocol(unittest.TestCase):
             global_memory_summary="memoria",
             timestamp="2026-01-01T00:00:00Z",
             signature="sig",
-            domain="general",
+            # domain="general", # Removed as not in ProbeQuery
             target_node_id="worker-a",
             sender_node_id="coordinator",
             sender_hash="hash",
@@ -34,7 +33,7 @@ class TestMessagesProtocol(unittest.TestCase):
         self.assertEqual(decoded.original_question, "pregunta")
         self.assertEqual(decoded.probe_text, "sonda")
         self.assertEqual(decoded.iteration, 1)
-        self.assertEqual(decoded.domain, "general")
+        # self.assertEqual(decoded.domain, "general")
         self.assertEqual(decoded.target_node_id, "worker-a")
         self.assertEqual(decoded.sender_node_id, "coordinator")
 

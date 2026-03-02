@@ -165,53 +165,6 @@ class Transport:
         )
         return response
 
-    def send_probe_async(self, node_id: str, probe: ProbeQuery) -> bool:
-        worker = self._workers.get(node_id)
-        if worker is not None:
-            return super().send_probe_async(node_id, probe)
-            
-        if node_id not in self._node_identities:
-            return False
-            
-        if not self._has_outbound_interface():
-            return False
-            
-        network_probe = ProbeQuery(
-            probe_id=probe.probe_id,
-            original_question=probe.original_question,
-            probe_text=probe.probe_text,
-            iteration=probe.iteration,
-            global_memory_summary=probe.global_memory_summary,
-            timestamp=probe.timestamp,
-            signature=probe.signature,
-            domain=probe.domain,
-            target_node_id=node_id,
-            sender_node_id=self.node_id,
-            sender_hash=self._destination_hash_hex,
-            previous_probes=probe.previous_probes,
-        )
-        
-        payload = self.protocol.encode_binary(network_probe)
-        
-        # Async send - do not block waiting for link if possible, but we need link to send
-        # We spawn a thread to handle the send so the caller returns immediately
-        def _send():
-            try:
-                link = self._ensure_link_active(node_id, wait_seconds=2.0, attempts=2)
-                if not link:
-                    print(f"[Transport] Async probe send failed: No link to {node_id}")
-                    return
-                
-                if len(payload) > link.MDU:
-                    RNS.Resource(payload, link)
-                else:
-                    RNS.Packet(link, payload).send()
-            except Exception as e:
-                print(f"[Transport] Async probe send error: {e}")
-                
-        threading.Thread(target=_send, daemon=True).start()
-        return True
-
     def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
         print(f"[Transport] Sending Task {assignment.task.task_id} to {node_id}")
         worker = self._workers.get(node_id)
@@ -768,6 +721,53 @@ class NetworkTransport(Transport):
         if not isinstance(response, EvidenceChunk):
             raise TypeError(f"Expected EvidenceChunk, got {type(response)}")
         return response
+
+    def send_probe_async(self, node_id: str, probe: ProbeQuery) -> bool:
+        # Try local delivery first via base class
+        if super().send_probe_async(node_id, probe):
+            return True
+            
+        if node_id not in self._node_identities:
+            return False
+            
+        if not self._has_outbound_interface():
+            return False
+            
+        network_probe = ProbeQuery(
+            probe_id=probe.probe_id,
+            original_question=probe.original_question,
+            probe_text=probe.probe_text,
+            iteration=probe.iteration,
+            global_memory_summary=probe.global_memory_summary,
+            timestamp=probe.timestamp,
+            signature=probe.signature,
+            domain=probe.domain,
+            target_node_id=node_id,
+            sender_node_id=self.node_id,
+            sender_hash=self._destination_hash_hex,
+            previous_probes=probe.previous_probes,
+        )
+        
+        payload = self.protocol.encode_binary(network_probe)
+        
+        # Async send - do not block waiting for link if possible, but we need link to send
+        # We spawn a thread to handle the send so the caller returns immediately
+        def _send():
+            try:
+                link = self._ensure_link_active(node_id, wait_seconds=2.0, attempts=2)
+                if not link:
+                    print(f"[Transport] Async probe send failed: No link to {node_id}")
+                    return
+                
+                if len(payload) > link.MDU:
+                    RNS.Resource(payload, link)
+                else:
+                    RNS.Packet(link, payload).send()
+            except Exception as e:
+                print(f"[Transport] Async probe send error: {e}")
+                
+        threading.Thread(target=_send, daemon=True).start()
+        return True
 
     def send_task(self, node_id: str, assignment: TaskAssignment) -> TaskResult:
         worker = self._workers.get(node_id)

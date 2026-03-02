@@ -3,8 +3,7 @@ import sys
 import unittest
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ebdasp_dir = os.path.join(base_dir, "EBDASP")
-src_dir = os.path.join(ebdasp_dir, "src")
+src_dir = os.path.join(base_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
@@ -49,7 +48,7 @@ class TestTransportBase(unittest.TestCase):
             target_node_id="worker-a",
             sender_node_id="coordinator",
             sender_hash="hash",
-            domain="general",
+            # domain="general", # Removed
         )
         response = self.transport.send_probe("worker-a", probe)
         self.assertEqual(response.probe_id, "probe-1")

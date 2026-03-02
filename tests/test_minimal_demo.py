@@ -5,14 +5,12 @@ import importlib.util
 import threading
 
 base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ebdasp_dir = os.path.join(base_dir, "EBDASP")
-src_dir = os.path.join(ebdasp_dir, "src")
+src_dir = os.path.join(base_dir, "src")
 if src_dir not in sys.path:
     sys.path.insert(0, src_dir)
 
-
 def load_minimal_demo():
-    path = os.path.join(ebdasp_dir, "examples", "minimal_demo.py")
+    path = os.path.join(base_dir, "examples", "minimal_demo.py")
     spec = importlib.util.spec_from_file_location("minimal_demo", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -52,7 +50,8 @@ class TestMinimalDemo(unittest.TestCase):
         app = TUI(
             transport=transport,
             orchestrator=orchestrator,
-            coordinator=None,
+            node_id="test-node",
+            network_enabled=False,
             stop_event=threading.Event(),
         )
         app._run_swarm_pipeline("pregunta")

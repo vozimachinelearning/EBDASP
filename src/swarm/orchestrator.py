@@ -324,20 +324,28 @@ Return a valid JSON object with a single key "probes" containing a list of strin
         """
         results = []
         available_nodes = self.transport.available_nodes()
-        if not available_nodes:
-            # If no other nodes, use self if possible (or just fail if strictly distributed)
-            # But transport.available_nodes() usually excludes self? No, it returns announcements.
-            # If empty, maybe we are the only one?
-            available_nodes = [self.transport.node_id]
+        
+        # Ensure we use ALL nodes: remote ones + local self
+        # Use a set to avoid duplicates if self is somehow in available_nodes
+        all_workers = list(set(available_nodes + [self.transport.node_id]))
+        
+        print(f"[Orchestrator] Dispatching {len(probes)} probes. Available pool: {len(all_workers)} nodes ({all_workers})")
 
         import random
         
         pending_probe_ids = []
         probe_map = {} # id -> text
         
+        # Distribute probes across all workers (Round-Robin)
+        # This ensures we don't just hammer one random node, but spread the load
+        # and utilize the full network width.
+        worker_index = 0
+        
         for probe_text in probes:
-            # Simple load balancing: pick random node
-            target_node = random.choice(available_nodes)
+            # Pick node round-robin
+            target_node = all_workers[worker_index % len(all_workers)]
+            worker_index += 1
+            
             probe_id = str(uuid.uuid4())
             
             msg = ProbeQuery(
@@ -351,7 +359,7 @@ Return a valid JSON object with a single key "probes" containing a list of strin
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
             )
             
-            print(f"[Orchestrator] Dispatching probe '{probe_text}' to {target_node}")
+            print(f"[Orchestrator] Dispatching probe '{probe_text[:30]}...' to {target_node}")
             if self.transport.send_probe_async(target_node, msg):
                 pending_probe_ids.append(probe_id)
                 probe_map[probe_id] = probe_text
@@ -422,6 +430,19 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
         """
         if not self.llm_engine:
              raise RuntimeError("LLMEngine is required for reasoning cycle.")
+
+        # Dynamic recursion depth adjustment based on network size
+        # Count all reachable nodes + self
+        available_nodes = self.transport.available_nodes()
+        network_size = len(available_nodes) + 1
+        
+        # Policy: Base depth of 3 + 1 per node, capped at 12
+        # This allows deeper reasoning when more compute/evidence sources are available
+        dynamic_depth = min(3 + network_size, 12)
+        
+        # Log the adjustment
+        print(f"[Orchestrator] Network Size: {network_size} nodes. Adjusting recursion depth: {max_iterations} -> {dynamic_depth}")
+        max_iterations = dynamic_depth
 
         print(f"[Orchestrator] Starting ComoRAG Reasoning Cycle for: {original_question}")
         
