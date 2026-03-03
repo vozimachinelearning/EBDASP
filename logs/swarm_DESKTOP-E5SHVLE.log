@@ -15352,3 +15352,99 @@ Swarm pipeline error: `temperature` (=0.0) has to be a strictly positive float, 
 [2026-03-02 17:51:28] [Error]    No interfaces could process the outbound packet
 [2026-03-02 17:51:28] [Error]    No interfaces could process the outbound packet
 [2026-03-02 17:51:37] [Error]    No interfaces could process the outbound packet
+
+--- Session Started: 2026-03-02 18:44:49 ---
+[2026-03-02 18:44:50] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:44:56] [Error]    No interfaces could process the outbound packet
+[Transport] Link established with unknown identity
+[2026-03-02 18:45:51] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:45:56] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:45:58] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:04] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:04] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:04] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:08] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:08] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:10] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:15] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:15] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:21] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:21] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:59] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:46:59] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:03] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:03] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:06] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:09] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:09] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:09] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:47:09] [Error]    No interfaces could process the outbound packet
+
+--- Session Started: 2026-03-02 18:47:39 ---
+[Transport] Link established with unknown identity
+[Transport] Node discovered: DESKTOP-GCO8VBA
+[Transport] Establishing link to DESKTOP-GCO8VBA...
+[2026-03-02 18:48:47] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:47] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:53] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:53] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:53] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:53] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:55] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:55] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:55] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:55] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:56] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:56] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:48:59] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:49:01] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:49:01] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:49:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:49:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:49:03] [Error]    No interfaces could process the outbound packet
+Starting swarm pipeline for: explain autism in depth
+[Orchestrator] Network Size: 3 nodes. Adjusting recursion depth: 5 -> 6
+[Orchestrator] Starting ComoRAG Reasoning Cycle for: explain autism in depth
+[Orchestrator] Iteration 1/6
+[Orchestrator] Iteration 1: Skipping early answer check to force swarm probe distribution.
+[2026-03-02 18:50:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:08] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:09] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:10] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:22] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:22] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:28] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:32] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:36] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:36] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:38] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:38] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:38] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:38] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:38] [Error]    No interfaces could process the outbound packet
+[Orchestrator] Dispatching 3 probes. Reachable pool: 2 nodes (['DESKTOP-E5SHVLE', 'DESKTOP-GCO8VBA'])
+[Orchestrator] Dispatching probe 'Exploring autism's origins and...' to DESKTOP-E5SHVLE
+[Orchestrator] Dispatching probe 'Analyzing autism-related resea...' to DESKTOP-GCO8VBA
+Swarm pipeline error: 'ProbeQuery' object has no attribute 'domain'
+[2026-03-02 18:50:49] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:50] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:56] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:50:57] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:01] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:02] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:07] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:07] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:08] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:08] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:11] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:13] [Error]    No interfaces could process the outbound packet
+[2026-03-02 18:51:19] [Error]    No interfaces could process the outbound packet

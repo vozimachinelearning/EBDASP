@@ -447,7 +447,14 @@ Return JSON only with keys:
                 }
         return {"consolidated_context": fallback_context, "key_entities": [], "open_questions": []}
 
-    def _dispatch_probes(self, probes: List[str], original_question: str, global_summary: str, previous_probes: List[str]) -> List[EvidenceChunk]:
+    def _dispatch_probes(
+        self,
+        probes: List[str],
+        original_question: str,
+        global_summary: str,
+        previous_probes: List[str],
+        domain: Optional[str] = None,
+    ) -> List[EvidenceChunk]:
         """
         Dispatches probes to workers and collects results using async transport and polling.
         """
@@ -507,6 +514,7 @@ Return JSON only with keys:
                 original_question=original_question,
                 probe_text=probe_text,
                 global_memory_summary=global_summary,
+                domain=domain,
                 previous_probes=previous_probes,
                 sender_node_id=self.transport.node_id,
                 target_node_id=target_node,
@@ -645,7 +653,13 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             previous_probes.extend(new_probes)
             
             # 3. Dispatch & Collect
-            collected_evidence = self._dispatch_probes(new_probes, original_question, historical_information, previous_probes)
+            collected_evidence = self._dispatch_probes(
+                new_probes,
+                original_question,
+                historical_information,
+                previous_probes,
+                domain=domain,
+            )
             
             # 4. Consolidate (JSON) + publish distributed memory
             consolidated = self._consolidate_evidence_state(

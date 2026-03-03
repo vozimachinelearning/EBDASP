@@ -307,3 +307,7 @@ Please note that the above text is a sample response and does
 --- Session Started: 2026-03-02 17:41:56 ---
 [17:43:56] You: explain autism in depth
 [17:43:56] Swarm pipeline error: `temperature` (=0.0) has to be a strictly positive float, otherwise your next token scores will be invalid. If you're looking for greedy decoding strategies, set `do_sample=False`.
+
+--- Session Started: 2026-03-02 18:47:39 ---
+[18:49:22] You: explain autism in depth
+[18:50:43] Swarm pipeline error: 'ProbeQuery' object has no attribute 'domain'
