@@ -303,3 +303,7 @@ Please note that the above text is a sample response and does
 --- Session Started: 2026-03-02 17:21:46 ---
 [17:26:22] [Pipeline ba22b326-ee0d-4747-aa0a-fa341658171a] START
 [17:26:22] [Pipeline ba22b326-ee0d-4747-aa0a-fa341658171a] Query: explain autism
+
+--- Session Started: 2026-03-02 17:41:56 ---
+[17:43:56] You: explain autism in depth
+[17:43:56] Swarm pipeline error: `temperature` (=0.0) has to be a strictly positive float, otherwise your next token scores will be invalid. If you're looking for greedy decoding strategies, set `do_sample=False`.
