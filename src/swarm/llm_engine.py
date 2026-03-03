@@ -12,13 +12,28 @@ class LLMEngine:
         print(f"Loading model from {model_path} on {device}...")
         
         try:
-            self.tokenizer = AutoTokenizer.from_pretrained(model_path, local_files_only=True)
-            self.model = AutoModelForCausalLM.from_pretrained(
-                model_path, 
-                torch_dtype=torch.float16 if device == "cuda" else torch.float32,
-                local_files_only=True,
-                device_map="auto" if device == "cuda" else None
-            )
+            def load_with(trust_remote_code: bool):
+                tokenizer = AutoTokenizer.from_pretrained(
+                    model_path,
+                    local_files_only=True,
+                    trust_remote_code=trust_remote_code,
+                )
+                model = AutoModelForCausalLM.from_pretrained(
+                    model_path,
+                    torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+                    local_files_only=True,
+                    device_map="auto" if device == "cuda" else None,
+                    trust_remote_code=trust_remote_code,
+                )
+                return tokenizer, model
+
+            try:
+                self.tokenizer, self.model = load_with(trust_remote_code=False)
+            except Exception as e:
+                msg = str(e).lower()
+                if "trust_remote_code" not in msg:
+                    raise
+                self.tokenizer, self.model = load_with(trust_remote_code=True)
             if device == "cpu":
                 self.model.to(device)
             
@@ -36,6 +51,8 @@ class LLMEngine:
                 "max_new_tokens": max_new_tokens,
                 "do_sample": do_sample,
                 "pad_token_id": self.tokenizer.eos_token_id,
+                "repetition_penalty": 1.12,
+                "no_repeat_ngram_size": 6,
             }
             if do_sample:
                 generation_kwargs["temperature"] = float(temperature)

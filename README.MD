@@ -23,10 +23,10 @@ c:\Users\LoOper\.reticulum\swarm\EBDASP\start-reticulum.bat
 
 ## Modelos
 - Configura los repos con variables de entorno opcionales:
-  - `SWARM_LLM_REPO` (por defecto `Qwen/Qwen2.5-0.5B-Instruct`)
+  - `SWARM_LLM_REPO` (por defecto `LiquidAI/LFM2.5-1.2B-Thinking`)
   - `SWARM_EMBED_REPO` (por defecto `BAAI/bge-m3`)
 - Rutas locales creadas por el .bat:
-  - `SWARM_LLM_PATH` en `EBDASP\models\llm`
+  - `SWARM_LLM_PATH` en `EBDASP\models\llm\<repo_id>` (por defecto `LiquidAI--LFM2.5-1.2B-Thinking`)
   - `SWARM_EMBED_PATH` en `EBDASP\models\embeddings`
 - El demo detecta automáticamente `models\llm` y `models\embeddings` y expone:
   - `SWARM_MODEL_PATH`

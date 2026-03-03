@@ -359,11 +359,11 @@ class SwarmTUI(App):
             return ""
         if isinstance(value, dict):
             if isinstance(value.get("final_answer"), str) and value.get("final_answer").strip():
-                return value["final_answer"].strip()
+                return self._dedupe_repeated_paragraphs(value["final_answer"].strip())
             if isinstance(value.get("content"), str) and value.get("content").strip():
-                return value["content"].strip()
+                return self._dedupe_repeated_paragraphs(value["content"].strip())
             if isinstance(value.get("consolidated_context"), str) and value.get("consolidated_context").strip():
-                return value["consolidated_context"].strip()
+                return self._dedupe_repeated_paragraphs(value["consolidated_context"].strip())
             return json.dumps(value, ensure_ascii=False, indent=2)
         if isinstance(value, list):
             parts = []
@@ -372,7 +372,7 @@ class SwarmTUI(App):
                     parts.append(item.strip())
                 elif isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text").strip():
                     parts.append(item["text"].strip())
-            return "\n".join(parts).strip()
+            return self._dedupe_repeated_paragraphs("\n".join(parts).strip())
         if not isinstance(value, str):
             return str(value).strip()
         text = value.strip()
@@ -381,7 +381,24 @@ class SwarmTUI(App):
         parsed = self._try_parse_json_from_text(text)
         if isinstance(parsed, (dict, list)):
             return self._format_response_text(parsed)
-        return text
+        return self._dedupe_repeated_paragraphs(text)
+
+    def _dedupe_repeated_paragraphs(self, text: str) -> str:
+        if not text:
+            return ""
+        paragraphs = re.split(r"\n\s*\n+", text.strip())
+        seen = set()
+        kept = []
+        for para in paragraphs:
+            cleaned = para.strip()
+            if not cleaned:
+                continue
+            key = re.sub(r"\s+", " ", cleaned).strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(cleaned)
+        return "\n\n".join(kept).strip()
 
     def _try_parse_json_from_text(self, text: str):
         try:
@@ -643,9 +660,31 @@ def main() -> None:
     default_llm_path = os.path.join(models_dir, "llm")
     default_embeddings_path = os.path.join(models_dir, "embeddings")
 
-    if not os.getenv("SWARM_MODEL_PATH") and os.path.exists(default_llm_path):
-        os.environ["SWARM_MODEL_PATH"] = default_llm_path
-        print(f"Automatically set SWARM_MODEL_PATH to {default_llm_path}")
+    if not os.getenv("SWARM_MODEL_PATH"):
+        resolved_llm_path = None
+        env_llm_path = os.getenv("SWARM_LLM_PATH")
+        if env_llm_path and os.path.exists(env_llm_path):
+            resolved_llm_path = env_llm_path
+        elif os.path.exists(default_llm_path):
+            if os.path.exists(os.path.join(default_llm_path, "config.json")):
+                resolved_llm_path = default_llm_path
+            else:
+                try:
+                    subdirs = [
+                        os.path.join(default_llm_path, name)
+                        for name in os.listdir(default_llm_path)
+                        if os.path.isdir(os.path.join(default_llm_path, name))
+                    ]
+                    candidates = [
+                        path for path in subdirs if os.path.exists(os.path.join(path, "config.json"))
+                    ]
+                    if len(candidates) == 1:
+                        resolved_llm_path = candidates[0]
+                except Exception:
+                    resolved_llm_path = None
+        if resolved_llm_path:
+            os.environ["SWARM_MODEL_PATH"] = resolved_llm_path
+            print(f"Automatically set SWARM_MODEL_PATH to {resolved_llm_path}")
 
     if not os.getenv("SWARM_EMBEDDING_PATH") and os.path.exists(default_embeddings_path):
         os.environ["SWARM_EMBEDDING_PATH"] = default_embeddings_path

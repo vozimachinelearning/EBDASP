@@ -581,10 +581,12 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
 ### Instructions
 1. Write a cohesive narrative.
 2. Use specific details from the context.
-3. Do NOT provide a short summary. Provide a full explanation.
-4. Format as Markdown.
+3. Do NOT include a "Summary" section.
+4. Do NOT repeat paragraphs or sentences.
+5. Stop when the answer is complete.
+6. Format as Markdown.
 """
-        return self.llm_engine.generate(prompt, max_new_tokens=2048, temperature=0.5)
+        return self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.4)
 
     def run_reasoning_cycle(self, original_question: str, max_iterations: int = 5, domain: Optional[str] = None) -> Dict[str, Any]:
         """
