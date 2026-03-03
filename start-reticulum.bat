@@ -41,13 +41,30 @@ if not exist "%SWARM_LLM_BASE%" mkdir "%SWARM_LLM_BASE%"
 if not exist "%SWARM_LLM_PATH%" mkdir "%SWARM_LLM_PATH%"
 if not exist "%SWARM_EMBED_PATH%" mkdir "%SWARM_EMBED_PATH%"
 "%VENV_DIR%\Scripts\python.exe" -c "from huggingface_hub import snapshot_download; snapshot_download('%SWARM_LLM_REPO%', local_dir=r'%SWARM_LLM_PATH%')"
+if errorlevel 1 (
+    call :prompt_hf_token
+    if defined HF_TOKEN "%VENV_DIR%\Scripts\python.exe" -c "from huggingface_hub import snapshot_download; snapshot_download('%SWARM_LLM_REPO%', local_dir=r'%SWARM_LLM_PATH%')"
+)
 if errorlevel 1 goto :error
 "%VENV_DIR%\Scripts\python.exe" -c "from huggingface_hub import snapshot_download; snapshot_download('%SWARM_EMBED_REPO%', local_dir=r'%SWARM_EMBED_PATH%')"
+if errorlevel 1 (
+    call :prompt_hf_token
+    if defined HF_TOKEN "%VENV_DIR%\Scripts\python.exe" -c "from huggingface_hub import snapshot_download; snapshot_download('%SWARM_EMBED_REPO%', local_dir=r'%SWARM_EMBED_PATH%')"
+)
 if errorlevel 1 goto :error
 start "" rnsd --config "%RNS_CONFIG_DIR%"
 timeout /t 3 /nobreak >nul
 python "%SWARM_ROOT%examples\minimal_demo.py"
 pause
+exit /b 0
+:prompt_hf_token
+if defined HF_TOKEN exit /b 0
+if defined HUGGINGFACE_HUB_TOKEN (
+    set "HF_TOKEN=%HUGGINGFACE_HUB_TOKEN%"
+    exit /b 0
+)
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "$sec=Read-Host 'HuggingFace token (input hidden)' -AsSecureString; if($sec){[Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec))}"`) do set "HF_TOKEN=%%A"
+if defined HF_TOKEN set "HUGGINGFACE_HUB_TOKEN=%HF_TOKEN%"
 exit /b 0
 :error
 echo Error al iniciar. Revisa la salida anterior.
