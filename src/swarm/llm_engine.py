@@ -29,11 +29,11 @@ class LLMEngine:
 
             try:
                 self.tokenizer, self.model = load_with(trust_remote_code=False)
-            except Exception as e:
-                msg = str(e).lower()
-                if "trust_remote_code" not in msg:
-                    raise
-                self.tokenizer, self.model = load_with(trust_remote_code=True)
+            except Exception as first_error:
+                try:
+                    self.tokenizer, self.model = load_with(trust_remote_code=True)
+                except Exception as second_error:
+                    raise second_error from first_error
             if device == "cpu":
                 self.model.to(device)
             
