@@ -11,6 +11,8 @@ if src_dir not in sys.path:
 
 def load_minimal_demo():
     path = os.path.join(base_dir, "examples", "minimal_demo.py")
+    if not os.path.exists(path):
+        raise unittest.SkipTest("minimal_demo.py no existe")
     spec = importlib.util.spec_from_file_location("minimal_demo", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

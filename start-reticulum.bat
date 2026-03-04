@@ -46,7 +46,7 @@ if errorlevel 1 goto :error
 if errorlevel 1 goto :error
 start "" rnsd --config "%RNS_CONFIG_DIR%"
 timeout /t 3 /nobreak >nul
-python "%SWARM_ROOT%examples\minimal_demo.py"
+python "%SWARM_ROOT%examples\backend_console.py"
 pause
 exit /b 0
 :error

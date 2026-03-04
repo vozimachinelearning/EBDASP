@@ -18,6 +18,11 @@ from .vector_store import VectorStore
 from .coordinator import Coordinator
 from .worker import Worker
 from .llm_engine import LLMEngine
+from .activation_tracker import ActivationTracker
+from .pruning import Pruner
+from .pruning_scheduler import PruningScheduler
+from .validation_benchmark import ValidationBenchmark
+from .performance_benchmark import PerformanceBenchmark
 
 __all__ = [
     "Coordinator",
@@ -39,4 +44,9 @@ __all__ = [
     "RouteRequest",
     "RouteResponse",
     "TextMessage",
+    "ActivationTracker",
+    "Pruner",
+    "PruningScheduler",
+    "ValidationBenchmark",
+    "PerformanceBenchmark",
 ]

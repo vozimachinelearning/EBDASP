@@ -81,6 +81,7 @@ class AnnounceCapabilities(Message):
     timestamp: str
     signature: str
     destination_hash: Optional[str] = None
+    specializations: Optional[List[Dict[str, Any]]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -105,6 +106,7 @@ class RouteRequest(Message):
     query_id: str
     domain: Optional[str]
     limit: int
+    collection: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
@@ -310,6 +312,7 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             timestamp=data["timestamp"],
             signature=data["signature"],
             destination_hash=data.get("destination_hash"),
+            specializations=list(data.get("specializations") or []),
         )
     if message_type == "heartbeat":
         return Heartbeat(
@@ -322,6 +325,7 @@ def message_from_dict(data: Dict[str, Any]) -> Message:
             query_id=data["query_id"],
             domain=data.get("domain"),
             limit=int(data.get("limit", 1)),
+            collection=data.get("collection"),
         )
     if message_type == "probe_query":
         return ProbeQuery(

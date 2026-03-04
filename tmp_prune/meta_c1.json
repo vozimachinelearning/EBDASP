@@ -1,0 +1,1 @@
+{"collection": "c1", "original_params": 10, "remaining_params": 5, "threshold_percent": 50.0, "pruned_layers": ["0"], "model_path": "C:\\Users\\LoOper\\.reticulum\\swarm\\EBDASP\\tmp_prune\\model_c1.pt"}

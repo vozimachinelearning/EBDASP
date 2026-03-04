@@ -230,6 +230,7 @@ class Orchestrator:
         self,
         question: str,
         domain: Optional[str] = None,
+        collection: Optional[str] = None,
         recursion_budget: int = 2,
         constraints: Optional[Dict[str, Any]] = None,
         max_workers: int = 3,
@@ -240,7 +241,7 @@ class Orchestrator:
             recursion_budget=recursion_budget,
             constraints=constraints,
         )
-        route_request = RouteRequest(query_id=request.query_id, domain=domain, limit=max_workers)
+        route_request = RouteRequest(query_id=request.query_id, domain=domain, limit=max_workers, collection=collection)
         route_response = self.transport.route(route_request)
         return [self.transport.send_query(node_id, request) for node_id in route_response.node_ids]
 

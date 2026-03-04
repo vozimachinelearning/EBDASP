@@ -4,13 +4,19 @@ import time
 import uuid
 import os
 import json
+import threading
+from collections import defaultdict
 from typing import Optional, TYPE_CHECKING, Dict, Any, List
 
-from .messages import EvidenceChunk, GlobalMemoryUpdate, ProbeQuery, QueryRequest, QueryResponse, TaskAssignment, TaskResult
+from .messages import AnnounceCapabilities, EvidenceChunk, GlobalMemoryUpdate, ProbeQuery, QueryRequest, QueryResponse, TaskAssignment, TaskResult
 from .protocol import Protocol
 from .vector_store import VectorStore
-# Only import LLMEngine if needed, or make it optional
-from .llm_engine import LLMEngine 
+from .llm_engine import LLMEngine
+from .activation_tracker import ActivationTracker
+from .pruning import Pruner
+from .pruning_scheduler import PruningScheduler
+from .validation_benchmark import ValidationBenchmark
+from .performance_benchmark import PerformanceBenchmark
 
 if TYPE_CHECKING:
     from .transport import Transport
@@ -21,6 +27,38 @@ class Worker:
         self.transport = transport
         self.store = store
         self.llm_engine = llm_engine
+        self._collection_id = self._resolve_collection_id()
+        self._base_model = getattr(self.llm_engine, "model", None) if self.llm_engine else None
+        self._model_lock = threading.Lock()
+        self._pruning_lock = threading.Lock()
+        self._pruning_in_progress: Dict[str, bool] = {}
+        self._pruned_models: Dict[str, Dict[str, Any]] = {}
+        self._pruning_enabled = os.getenv("SWARM_PRUNING_ENABLED", "1") != "0"
+        self._pruning_scheduler = None
+        self._pruning_poll_seconds = float(os.getenv("SWARM_PRUNE_POLL_SECONDS", "30"))
+        self._seen_collections = set()
+        self._stop_event = threading.Event()
+        self._activation_tracker = None
+        self._validation_benchmark = None
+        self._performance_benchmark = None
+        if self._base_model is not None:
+            tracker_enabled = os.getenv("SWARM_ACTIVATION_TRACKING", "1") != "0"
+            activation_threshold = float(os.getenv("SWARM_ACTIVATION_THRESHOLD", "0.1"))
+            self._activation_tracker = ActivationTracker(self._base_model, activation_threshold=activation_threshold, enabled=tracker_enabled)
+        if self._pruning_enabled and self._base_model is not None and self._activation_tracker is not None:
+            min_queries = int(os.getenv("SWARM_PRUNE_MIN_QUERIES", "100"))
+            idle_seconds = float(os.getenv("SWARM_PRUNE_IDLE_SECONDS", "300"))
+            self._pruning_scheduler = PruningScheduler(min_queries=min_queries, idle_seconds=idle_seconds)
+            threading.Thread(target=self._pruning_loop, daemon=True).start()
+        validation_enabled = os.getenv("SWARM_VALIDATION_ENABLED", "0") == "1"
+        if validation_enabled:
+            queries = self._load_validation_queries()
+            self._validation_benchmark = ValidationBenchmark(queries=queries)
+        perf_enabled = os.getenv("SWARM_PERF_BENCHMARK_ENABLED", "0") == "1"
+        if perf_enabled:
+            prompt = os.getenv("SWARM_PERF_PROMPT", "benchmark")
+            max_tokens = int(os.getenv("SWARM_PERF_MAX_TOKENS", "64"))
+            self._performance_benchmark = PerformanceBenchmark(prompt=prompt, max_new_tokens=max_tokens)
 
     def _compact_text(self, text: str, limit: int = 400) -> str:
         cleaned = " ".join(text.split())
@@ -41,6 +79,7 @@ class Worker:
         return [chunk for chunk in chunks if chunk]
 
     def handle_query(self, request: QueryRequest) -> QueryResponse:
+        self._record_activity(self._collection_id)
         return QueryResponse(
             query_id=request.query_id,
             claims=[],
@@ -50,6 +89,8 @@ class Worker:
         )
 
     def handle_probe(self, probe_query: ProbeQuery) -> EvidenceChunk:
+        collection_id = self._collection_id
+        self._record_activity(collection_id)
         query = probe_query.probe_text
         if probe_query.global_memory_summary:
             query = f"{probe_query.probe_text}\n{probe_query.global_memory_summary}"
@@ -123,11 +164,8 @@ class Worker:
             
             # Generate the fused insight
             # Using a higher token limit as requested for "hundreds of tokens"
-            fused_insight = self.llm_engine.generate(full_prompt, max_new_tokens=1024, temperature=0.3)
-            
-            # For backward compatibility or if needed, we can also keep a simple insight, 
-            # but fused_insight is the primary ComoRAG output.
-            worker_insight = fused_insight 
+            fused_insight = self._generate_with_model(collection_id, full_prompt, max_new_tokens=1024, temperature=0.3)
+            worker_insight = fused_insight
 
         evidence = EvidenceChunk(
             probe_id=probe_query.probe_id,
@@ -160,6 +198,8 @@ class Worker:
         print(f"  > Description: {task.description[:100]}...")
         
         result_text = ""
+        collection_id = self._collection_id
+        self._record_activity(collection_id)
         if self.llm_engine:
             print(f"[Worker:{self.transport.node_id}] Executing with LLM...")
             global_goal = assignment.global_goal or ""
@@ -206,7 +246,7 @@ class Worker:
                 "Return a JSON object with keys: topic, evidence, reasoning, confidence."
             )
             # Assuming generate is blocking for now
-            result_text = self.llm_engine.generate(prompt)
+            result_text = self._generate_with_model(collection_id, prompt)
             print(f"[Worker:{self.transport.node_id}] LLM Generation complete ({len(result_text)} chars).")
         else:
             print(f"[Worker:{self.transport.node_id}] Simulating execution.")
@@ -288,3 +328,174 @@ class Worker:
             "version": version_value,
             "text": "\n".join(text_lines).strip(),
         }
+
+    def _resolve_collection_id(self) -> str:
+        if self.store and hasattr(self.store, "collection_id"):
+            value = getattr(self.store, "collection_id")
+            if value:
+                return str(value)
+        return "default"
+
+    def _record_activity(self, collection_id: str) -> None:
+        self._seen_collections.add(collection_id)
+        if self._pruning_scheduler:
+            self._pruning_scheduler.record_query(collection_id)
+
+    def _generate_with_model(self, collection_id: str, prompt: str, max_new_tokens: int = 256, temperature: float = 0.7) -> str:
+        model = self._select_model(collection_id)
+        tracker = self._activation_tracker
+        previous_collection = None
+        if tracker:
+            previous_collection = tracker._active_collection
+            tracker.set_collection(collection_id)
+        with self._model_lock:
+            previous_model = self.llm_engine.model if self.llm_engine else None
+            if self.llm_engine and model is not None and model is not previous_model:
+                self.llm_engine.model = model
+            try:
+                result = self.llm_engine.generate(prompt, max_new_tokens=max_new_tokens, temperature=temperature) if self.llm_engine else ""
+            finally:
+                if self.llm_engine and model is not None and model is not previous_model:
+                    self.llm_engine.model = previous_model
+        if tracker:
+            tracker.set_collection(previous_collection)
+        return result
+
+    def _select_model(self, collection_id: str):
+        entry = self._pruned_models.get(collection_id)
+        if entry:
+            entry["last_used"] = time.time()
+            return entry.get("model")
+        return self._base_model
+
+    def _pruning_loop(self) -> None:
+        while not self._stop_event.is_set():
+            time.sleep(self._pruning_poll_seconds)
+            if not self._pruning_scheduler:
+                continue
+            for collection_id in list(self._seen_collections):
+                if self._pruning_scheduler.should_prune(collection_id):
+                    self._maybe_prune(collection_id)
+
+    def _maybe_prune(self, collection_id: str) -> None:
+        if not self._pruning_enabled or not self._pruning_scheduler:
+            return
+        if not self._activation_tracker or not self._base_model:
+            return
+        with self._pruning_lock:
+            if self._pruning_in_progress.get(collection_id):
+                return
+            self._pruning_in_progress[collection_id] = True
+        try:
+            stats = self._activation_tracker.get_stats(collection_id)
+            if not stats:
+                return
+            threshold = float(os.getenv("SWARM_PRUNE_THRESHOLD_PERCENT", "5"))
+            pruner = Pruner(self._base_model, {collection_id: stats}, threshold_percent=threshold)
+            base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+            save_dir = os.path.join(base_dir, "models", "pruned", str(self.transport.node_id))
+            result = pruner.prune_for_collection(collection_id, save_dir)
+            if not result:
+                return
+            pruned_model, meta = result
+            accuracy = self._evaluate_pruned_model(collection_id, pruned_model)
+            speed = self._estimate_speedup(collection_id, pruned_model)
+            meta["accuracy_maintained"] = accuracy
+            meta["relative_speed"] = speed
+            self._store_pruned_model(collection_id, pruned_model, meta)
+            self._announce_specialization(collection_id, meta)
+            self._activation_tracker.reset(collection_id)
+            self._pruning_scheduler.mark_pruned(collection_id)
+        finally:
+            with self._pruning_lock:
+                self._pruning_in_progress[collection_id] = False
+
+    def _store_pruned_model(self, collection_id: str, model: Any, meta: Dict[str, Any]) -> None:
+        self._pruned_models[collection_id] = {
+            "model": model,
+            "meta": meta,
+            "last_used": time.time(),
+        }
+        limit = int(os.getenv("SWARM_PRUNED_MODEL_LIMIT", "3"))
+        if limit <= 0:
+            return
+        if len(self._pruned_models) <= limit:
+            return
+        ordered = sorted(self._pruned_models.items(), key=lambda item: item[1].get("last_used", 0))
+        while len(self._pruned_models) > limit and ordered:
+            key, _ = ordered.pop(0)
+            if key == collection_id:
+                continue
+            self._pruned_models.pop(key, None)
+
+    def _announce_specialization(self, collection_id: str, meta: Dict[str, Any]) -> None:
+        if not hasattr(self.transport, "announce"):
+            return
+        announcement = None
+        if hasattr(self.transport, "_announcements"):
+            announcement = self.transport._announcements.get(self.transport.node_id)
+        domains = list(getattr(announcement, "domains", []) or [])
+        collections = list(getattr(announcement, "collections", []) or [])
+        if collection_id not in collections:
+            collections.append(collection_id)
+        specs = list(getattr(announcement, "specializations", []) or [])
+        specs = [spec for spec in specs if spec.get("collection") != collection_id]
+        spec = {
+            "collection": collection_id,
+            "model_path": meta.get("model_path"),
+            "original_params": meta.get("original_params"),
+            "remaining_params": meta.get("remaining_params"),
+            "threshold_percent": meta.get("threshold_percent"),
+            "relative_speed": meta.get("relative_speed", 1.0),
+            "accuracy_maintained": meta.get("accuracy_maintained", 1.0),
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        specs.append(spec)
+        message = AnnounceCapabilities(
+            node_id=self.transport.node_id,
+            domains=domains,
+            collections=collections,
+            timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            signature="",
+            specializations=specs,
+        )
+        self.transport.announce(message)
+
+    def _evaluate_pruned_model(self, collection_id: str, model: Any) -> float:
+        if not self._validation_benchmark or not self.llm_engine:
+            return 1.0
+        with self._model_lock:
+            previous_model = self.llm_engine.model
+            self.llm_engine.model = model
+            try:
+                score = self._validation_benchmark.evaluate(lambda prompt: self.llm_engine.generate(prompt))
+            finally:
+                self.llm_engine.model = previous_model
+        return float(score)
+
+    def _estimate_speedup(self, collection_id: str, model: Any) -> float:
+        if not self._performance_benchmark or not self.llm_engine:
+            return 1.0
+        with self._model_lock:
+            previous_model = self.llm_engine.model
+            self.llm_engine.model = model
+            try:
+                pruned_speed = self._performance_benchmark.measure(self.llm_engine.generate)
+            finally:
+                self.llm_engine.model = previous_model
+        base_speed = self._performance_benchmark.measure(self.llm_engine.generate)
+        if not pruned_speed or not base_speed:
+            return 1.0
+        return max(0.1, min(10.0, pruned_speed / base_speed))
+
+    def _load_validation_queries(self) -> List[str]:
+        raw = os.getenv("SWARM_VALIDATION_QUERIES", "")
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+        if isinstance(parsed, list):
+            return [str(item) for item in parsed if str(item)]
+        return []

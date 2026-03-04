@@ -31,10 +31,14 @@ class Transport:
         self,
         node_id: str,
         heartbeat_ttl_seconds: float = 15.0,
+        specialization_ttl_seconds: Optional[float] = None,
         time_provider: Optional[Callable[[], float]] = None,
     ) -> None:
         self.node_id = node_id
         self.heartbeat_ttl_seconds = heartbeat_ttl_seconds
+        if specialization_ttl_seconds is None:
+            specialization_ttl_seconds = float(os.getenv("SWARM_SPECIALIZATION_TTL_SECONDS", "600"))
+        self.specialization_ttl_seconds = float(specialization_ttl_seconds)
         self._time_provider = time_provider or time.time
         self._workers: Dict[str, Worker] = {}
         self._announcements: Dict[str, AnnounceCapabilities] = {}
@@ -64,6 +68,7 @@ class Transport:
             payload={
                 "domains": list(announcement.domains),
                 "collections": list(announcement.collections),
+                "specializations": list(getattr(announcement, "specializations", []) or []),
             },
         )
 
@@ -86,12 +91,14 @@ class Transport:
         """
         return [nid for nid in node_ids if self.is_node_reachable(nid)]
 
-    def available_nodes(self, domain: Optional[str] = None) -> List[str]:
+    def available_nodes(self, domain: Optional[str] = None, collection: Optional[str] = None) -> List[str]:
         self._prune_stale()
         with self._lock:
             candidates = list(self._announcements.values())
         if domain:
             candidates = [item for item in candidates if domain in item.domains]
+        if collection:
+            candidates = [item for item in candidates if collection in item.collections]
         return [item.node_id for item in candidates]
 
     def live_status(self) -> List[Dict[str, Any]]:
@@ -139,18 +146,58 @@ class Transport:
         return activity
 
     def route(self, request: RouteRequest) -> RouteResponse:
-        candidates = self.available_nodes(domain=request.domain)
-        node_ids = candidates[: request.limit]
+        candidates = self._rank_route_candidates(request.domain, request.collection)
+        node_ids = [node_id for node_id, _ in candidates[: request.limit]]
         self.emit_activity(
             "route",
             node_id=None,
             payload={
                 "query_id": request.query_id,
                 "domain": request.domain,
-                "candidates": list(candidates),
+                "collection": request.collection,
+                "candidates": [node_id for node_id, _ in candidates],
             },
         )
         return RouteResponse(query_id=request.query_id, node_ids=node_ids)
+
+    def _rank_route_candidates(self, domain: Optional[str], collection: Optional[str]) -> List[Tuple[str, float]]:
+        self._prune_stale()
+        now = self._time_provider()
+        with self._lock:
+            announcements = list(self._announcements.values())
+        if domain:
+            announcements = [item for item in announcements if domain in item.domains]
+        if collection:
+            announcements = [item for item in announcements if collection in item.collections]
+        ranked: List[Tuple[str, float]] = []
+        for announcement in announcements:
+            score = 1.0
+            specs = list(getattr(announcement, "specializations", []) or [])
+            if collection and specs:
+                for spec in specs:
+                    if spec.get("collection") != collection:
+                        continue
+                    timestamp = spec.get("timestamp")
+                    if timestamp and self.specialization_ttl_seconds:
+                        last_seen = self._last_seen.get(announcement.node_id, 0.0)
+                        if now - last_seen > self.specialization_ttl_seconds:
+                            continue
+                    speed = float(spec.get("relative_speed", 1.0) or 1.0)
+                    accuracy = float(spec.get("accuracy_maintained", 1.0) or 1.0)
+                    size = spec.get("remaining_params") or spec.get("model_size_mb") or 0.0
+                    size_factor = 1.0
+                    try:
+                        size_value = float(size)
+                        if size_value > 0:
+                            size_factor = 1.0 / (1.0 + size_value)
+                    except Exception:
+                        size_factor = 1.0
+                    spec_score = 5.0 * max(0.1, speed) * max(0.1, accuracy)
+                    spec_score += size_factor
+                    score = max(score, spec_score)
+            ranked.append((announcement.node_id, score))
+        ranked.sort(key=lambda item: item[1], reverse=True)
+        return ranked
 
     def send_query(self, node_id: str, request: QueryRequest) -> QueryResponse:
         worker = self._workers.get(node_id)
@@ -687,6 +734,7 @@ class NetworkTransport(Transport):
             timestamp=announcement.timestamp,
             signature=announcement.signature,
             destination_hash=self._destination_hash_hex,
+            specializations=list(getattr(announcement, "specializations", []) or []),
         )
         super().announce(announcement)
         if announcement.node_id in self._workers:
