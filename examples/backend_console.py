@@ -562,26 +562,27 @@ class SwarmTUI(App):
                 results = self.orchestrator.run_reasoning_cycle(user_input)
             
             final_answer = results.get('final_answer', 'No answer generated.')
-            parts = results.get("parts", [])
-            if parts:
-                for part in parts:
-                    node_id = part.get("node_id", "")
-                    formatted = self._format_response_text(part.get("result", ""))
-                    if formatted:
-                        self._write_activity(f"[{node_id or 'worker'}] {formatted}")
-            results_list = results.get("results", [])
-            for item in results_list:
-                evidence = item.get("evidence", [])
-                if evidence:
-                    for chunk in evidence:
-                        chunk_id = chunk.get("chunk_id", "")
-                        source = chunk.get("source", "")
-                        text = chunk.get("text", "")
-                        formatted = self._format_response_text(text)
+            if mode != "code":
+                parts = results.get("parts", [])
+                if parts:
+                    for part in parts:
+                        node_id = part.get("node_id", "")
+                        formatted = self._format_response_text(part.get("result", ""))
                         if formatted:
-                            label = f"[Evidence {chunk_id}]" if chunk_id else "[Evidence]"
-                            prefix = f"{label} {source}: " if source else f"{label} "
-                            self._write_activity(prefix + formatted)
+                            self._write_activity(f"[{node_id or 'worker'}] {formatted}")
+                results_list = results.get("results", [])
+                for item in results_list:
+                    evidence = item.get("evidence", [])
+                    if evidence:
+                        for chunk in evidence:
+                            chunk_id = chunk.get("chunk_id", "")
+                            source = chunk.get("source", "")
+                            text = chunk.get("text", "")
+                            formatted = self._format_response_text(text)
+                            if formatted:
+                                label = f"[Evidence {chunk_id}]" if chunk_id else "[Evidence]"
+                                prefix = f"{label} {source}: " if source else f"{label} "
+                                self._write_activity(prefix + formatted)
             
             formatted_final = self._format_response_text(final_answer)
             if formatted_final:

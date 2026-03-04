@@ -34,6 +34,8 @@ class Orchestrator:
         filtered = []
         for record in records:
             text = str(record.get("text", ""))
+            if self._looks_prompt_like(text):
+                continue
             if self._overlap_score(text, goal) >= min_overlap:
                 filtered.append(record)
         return filtered
@@ -84,6 +86,91 @@ class Orchestrator:
             stripped = re.sub(r"^```[a-zA-Z0-9]*", "", stripped).strip()
             stripped = stripped.rstrip("`").strip()
         return bool(stripped) and (stripped.startswith("{") or stripped.startswith("["))
+
+    def _has_code_block(self, text: str) -> bool:
+        if not text:
+            return False
+        return "```" in text
+
+    def _looks_prompt_like(self, text: str) -> bool:
+        lowered = text.lower()
+        tokens = [
+            "### role",
+            "### task",
+            "### instructions",
+            "### output",
+            "output rules",
+            "output format",
+            "response format",
+            "return json",
+            "return markdown",
+            "your response",
+            "begin this section",
+            "format your output",
+            "do not output",
+            "do not include",
+            "include at least",
+            "references",
+            "acknowledgments",
+            "further reading",
+            "additional notes",
+            "style:",
+        ]
+        return any(token in lowered for token in tokens)
+
+    def _looks_instruction_line(self, line: str) -> bool:
+        lowered = line.lower()
+        if re.match(r"^\s*\d+\.\s", line):
+            if any(token in lowered for token in ["include", "ensure", "do not", "return", "output", "format", "start with", "begin"]):
+                return True
+        if re.match(r"^\s*#+\s*(role|task|instructions|output|response)\b", lowered):
+            return True
+        if lowered.startswith("note:") or lowered.startswith("your response"):
+            return True
+        if "response format" in lowered or "output format" in lowered:
+            return True
+        return False
+
+    def _strip_prompt_instructions(self, text: str) -> str:
+        if not text:
+            return text
+        lines = text.splitlines()
+        cleaned: List[str] = []
+        skipping = True
+        for line in lines:
+            stripped = line.strip()
+            if skipping:
+                if not stripped:
+                    continue
+                if self._looks_instruction_line(stripped) or self._looks_prompt_like(stripped):
+                    continue
+                skipping = False
+            if self._looks_instruction_line(stripped) or self._looks_prompt_like(stripped):
+                continue
+            cleaned.append(line)
+        cleaned_text = "\n".join(cleaned).strip()
+        return cleaned_text or text.strip()
+
+    def _is_outline_like(self, text: str) -> bool:
+        if not text:
+            return False
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        part_lines = sum(
+            1
+            for line in lines
+            if re.match(r"^#+\s*part\s+\d+", line, re.IGNORECASE) or re.match(r"^part\s+\d+", line, re.IGNORECASE)
+        )
+        instruction_lines = sum(
+            1
+            for line in lines[:8]
+            if re.match(r"^\d+\.", line) and any(token in line.lower() for token in ["include", "ensure", "do not", "return", "output", "format"])
+        )
+        lowered = text.lower()
+        if part_lines >= 3 or instruction_lines >= 1:
+            return True
+        if any(token in lowered for token in ["references", "acknowledgments", "further reading", "additional notes", "style:", "your response:"]):
+            return True
+        return False
 
     def _safe_json(self, text: str) -> Optional[Any]:
         if text is None:
@@ -307,7 +394,7 @@ Return JSON only.
 You are a senior software engineer.
 
 ### Task
-Write working code that solves the user's request. If the request is ambiguous, pick the most reasonable assumptions and implement them.
+Write working code that fully solves the user's request. If the request is ambiguous, pick the most reasonable assumptions and implement them. Provide a complete implementation with all necessary files and details.
 
 ### User Request
 {question}
@@ -319,11 +406,24 @@ Write working code that solves the user's request. If the request is ambiguous, 
 - Return Markdown.
 - Include code in fenced code blocks with a language tag.
 - If multiple files are needed, label each block with its file path on the line before the fence.
-- Prefer concise, correct implementations over long explanations.
+- Do not include evidence, outlines, or planning steps.
 """
-            response = self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.2)
+            response = self.llm_engine.generate(prompt, max_new_tokens=2200, temperature=0.2)
             candidate = (response or "").strip()
-            return candidate if candidate and candidate != "*" else "*"
+            if candidate and candidate != "*" and self._has_code_block(candidate):
+                return candidate
+            retry_prompt = f"""
+You are a senior software engineer. Produce the final answer as code.
+User Request: {question}
+Context: {context}
+
+Return Markdown with code in fenced blocks with language tags.
+If multiple files are needed, label each block with its file path on the line before the fence.
+Do not include explanations, outlines, or evidence.
+"""
+            retry = self.llm_engine.generate(retry_prompt, max_new_tokens=2200, temperature=0.2)
+            retry_candidate = (retry or "").strip()
+            return retry_candidate if retry_candidate and retry_candidate != "*" and self._has_code_block(retry_candidate) else "*"
             
         rag_qa_system = (
             "### Role\n"
@@ -499,21 +599,26 @@ Return JSON only with keys:
 
         remote_candidates = [nid for nid in candidates if nid not in local_workers and nid != self.transport.node_id]
         if remote_candidates and not any(nid in all_workers for nid in remote_candidates) and hasattr(self.transport, "filter_reachable_nodes"):
-            deadline = time.monotonic() + 2.0
+            deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 time.sleep(0.2)
                 refreshed = self.transport.filter_reachable_nodes(candidates)
                 if any(nid in refreshed for nid in remote_candidates):
                     all_workers = refreshed
                     break
-        
+
+        if not all_workers:
+            all_workers = candidates
+
+        dispatch_pool = [nid for nid in all_workers if nid in remote_candidates] + [
+            nid for nid in all_workers if nid not in remote_candidates
+        ]
+
         if len(all_workers) < len(candidates):
             skipped = set(candidates) - set(all_workers)
             print(f"[Orchestrator] Skipped unreachable nodes: {skipped}")
             
-        print(f"[Orchestrator] Dispatching {len(probes)} probes. Reachable pool: {len(all_workers)} nodes ({all_workers})")
-
-        import random
+        print(f"[Orchestrator] Dispatching {len(probes)} probes. Reachable pool: {len(dispatch_pool)} nodes ({dispatch_pool})")
         
         pending_probe_ids = []
         probe_map = {} # id -> text
@@ -523,35 +628,40 @@ Return JSON only with keys:
         # and utilize the full network width.
         worker_index = 0
 
-        if not all_workers:
+        if not dispatch_pool:
             print("[Orchestrator] No reachable workers available for probe dispatch")
             return []
         
         for probe_text in probes:
-            # Pick node round-robin
-            target_node = all_workers[worker_index % len(all_workers)]
-            worker_index += 1
-            
             probe_id = str(uuid.uuid4())
-            
-            msg = ProbeQuery(
-                probe_id=probe_id,
-                original_question=original_question,
-                probe_text=probe_text,
-                global_memory_summary=global_summary,
-                domain=domain,
-                previous_probes=previous_probes,
-                sender_node_id=self.transport.node_id,
-                target_node_id=target_node,
-                timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            )
-            
-            print(f"[Orchestrator] Dispatching probe '{probe_text[:30]}...' to {target_node}")
-            if self.transport.send_probe_async(target_node, msg):
-                pending_probe_ids.append(probe_id)
-                probe_map[probe_id] = probe_text
-            else:
-                print(f"[Orchestrator] Failed to dispatch probe to {target_node}")
+            sent = False
+            attempt = 0
+            start = time.monotonic()
+            max_attempts = max(1, len(dispatch_pool) * 2)
+            while not sent and attempt < max_attempts and time.monotonic() - start < 4.0:
+                target_node = dispatch_pool[worker_index % len(dispatch_pool)]
+                worker_index += 1
+                msg = ProbeQuery(
+                    probe_id=probe_id,
+                    original_question=original_question,
+                    probe_text=probe_text,
+                    global_memory_summary=global_summary,
+                    domain=domain,
+                    previous_probes=previous_probes,
+                    sender_node_id=self.transport.node_id,
+                    target_node_id=target_node,
+                    timestamp=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                )
+                print(f"[Orchestrator] Dispatching probe '{probe_text[:30]}...' to {target_node}")
+                if self.transport.send_probe_async(target_node, msg):
+                    pending_probe_ids.append(probe_id)
+                    probe_map[probe_id] = probe_text
+                    sent = True
+                    break
+                attempt += 1
+                time.sleep(0.3)
+            if not sent:
+                print(f"[Orchestrator] Failed to dispatch probe for '{probe_text[:30]}...'")
 
         if not pending_probe_ids:
             return []
@@ -595,7 +705,7 @@ Return JSON only with keys:
 You are a senior software engineer.
 
 ### Task
-Produce a complete coding answer to the user's request. Use the context only if it is relevant and correct.
+Produce a complete coding answer to the user's request. Use the context only if it is relevant and correct. Make the response as complete and detailed as possible.
 
 ### User Request
 {question}
@@ -609,7 +719,22 @@ Produce a complete coding answer to the user's request. Use the context only if 
 - If multiple files are needed, label each block with its file path on the line before the fence.
 - Include brief setup/run instructions only when necessary.
 """
-            return self.llm_engine.generate(prompt, max_new_tokens=1600, temperature=0.2)
+            response = self.llm_engine.generate(prompt, max_new_tokens=2400, temperature=0.2)
+            candidate = self._strip_prompt_instructions(response)
+            if self._has_code_block(candidate):
+                return candidate
+            retry_prompt = f"""
+You are a senior software engineer. Produce the final answer as code.
+User Request: {question}
+Context: {context}
+
+Return Markdown with code in fenced blocks with language tags.
+If multiple files are needed, label each block with its file path on the line before the fence.
+Do not include explanations, outlines, or evidence.
+"""
+            retry = self.llm_engine.generate(retry_prompt, max_new_tokens=2400, temperature=0.2)
+            retry_candidate = self._strip_prompt_instructions(retry)
+            return retry_candidate if self._has_code_block(retry_candidate) else retry_candidate
             
         prompt = f"""
 ### Role
@@ -632,8 +757,24 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
 4. Do NOT repeat paragraphs or sentences.
 5. Stop when the answer is complete.
 6. Format as Markdown.
+7. Do NOT include instructions, outlines, or section placeholders.
+8. Do NOT include sections titled References, Acknowledgments, Further Reading, Additional Notes, or Style.
 """
-        return self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.4)
+        response = self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.4)
+        cleaned = self._strip_prompt_instructions(response)
+        if self._is_outline_like(cleaned):
+            rewrite_prompt = f"""
+You are writing the final answer to the user's question using the context.
+Question: {question}
+Context: {context}
+
+Write a comprehensive, well-structured answer in paragraphs.
+Do not include instructions, outlines, or section placeholders.
+Do not include sections titled Summary, References, Acknowledgments, Further Reading, Additional Notes, or Style.
+"""
+            rewritten = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1400, temperature=0.35)
+            cleaned = self._strip_prompt_instructions(rewritten)
+        return cleaned
 
     def run_reasoning_cycle(
         self,
@@ -1195,6 +1336,22 @@ Content:
 {final_answer}
 """
                     final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1100, temperature=0.35)
+                final_answer = self._strip_prompt_instructions(final_answer)
+                if self._is_outline_like(final_answer):
+                    rewrite_prompt = f"""
+You are writing the final answer to the user's question using the evidence map and draft.
+Question: {question}
+Evidence Map:
+{evidence_map}
+Draft:
+{draft_answer}
+
+Write a comprehensive, well-structured answer in paragraphs.
+Do not include instructions, outlines, or section placeholders.
+Do not include sections titled Summary, References, Acknowledgments, Further Reading, Additional Notes, or Style.
+"""
+                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1100, temperature=0.35)
+                    final_answer = self._strip_prompt_instructions(final_answer)
                 print(f"Task completed. Final Answer: {final_answer[:200]}...")
                 self.transport.emit_activity(
                     "pipeline_final",

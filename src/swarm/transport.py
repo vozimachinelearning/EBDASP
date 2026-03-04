@@ -859,6 +859,8 @@ class NetworkTransport(Transport):
 
         link = self._links.get(node_id)
         if link is None or link.status != RNS.Link.ACTIVE:
+            link = self._ensure_link_active(node_id, wait_seconds=0.8, attempts=1)
+        if link is None or link.status != RNS.Link.ACTIVE:
             self._schedule_connect(node_id)
             return False
             
