@@ -292,13 +292,37 @@ Return JSON only.
                 flattened.append(chunk)
         return flattened
 
-    def _attempt_answer(self, question: str, context: str) -> str:
+    def _attempt_answer(self, question: str, context: str, mode: str = "info") -> str:
         """
         Tries to answer the question using the RAG QA Narrative prompt.
         Returns "*" if the answer cannot be determined.
         """
         if not self.llm_engine:
             return "*"
+
+        if mode == "code":
+            prompt = f"""
+### Role
+You are a senior software engineer.
+
+### Task
+Write working code that solves the user's request. If the request is ambiguous, pick the most reasonable assumptions and implement them.
+
+### User Request
+{question}
+
+### Available Context
+{context}
+
+### Output Rules
+- Return Markdown.
+- Include code in fenced code blocks with a language tag.
+- If multiple files are needed, label each block with its file path on the line before the fence.
+- Prefer concise, correct implementations over long explanations.
+"""
+            response = self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.2)
+            candidate = (response or "").strip()
+            return candidate if candidate and candidate != "*" else "*"
             
         rag_qa_system = (
             "### Role\n"
@@ -560,9 +584,31 @@ Return JSON only with keys:
         print(f"[Orchestrator] Collected {len(results)}/{len(pending_probe_ids)} probe responses")
         return results
 
-    def _synthesize_long_answer(self, question: str, context: str) -> str:
+    def _synthesize_long_answer(self, question: str, context: str, mode: str = "info") -> str:
         if not self.llm_engine:
             return "LLM Engine not available."
+
+        if mode == "code":
+            prompt = f"""
+### Role
+You are a senior software engineer.
+
+### Task
+Produce a complete coding answer to the user's request. Use the context only if it is relevant and correct.
+
+### User Request
+{question}
+
+### Context
+{context}
+
+### Output Rules
+- Return Markdown.
+- Include code in fenced code blocks with a language tag.
+- If multiple files are needed, label each block with its file path on the line before the fence.
+- Include brief setup/run instructions only when necessary.
+"""
+            return self.llm_engine.generate(prompt, max_new_tokens=1600, temperature=0.2)
             
         prompt = f"""
 ### Role
@@ -588,12 +634,26 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
 """
         return self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.4)
 
-    def run_reasoning_cycle(self, original_question: str, max_iterations: int = 5, domain: Optional[str] = None) -> Dict[str, Any]:
+    def run_reasoning_cycle(
+        self,
+        original_question: str,
+        max_iterations: int = 5,
+        domain: Optional[str] = None,
+        mode: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """
         Executes the ComoRAG Meta-Control Loop.
         """
         if not self.llm_engine:
              raise RuntimeError("LLMEngine is required for reasoning cycle.")
+
+        normalized_mode = (mode or os.getenv("SWARM_MODE", "info")).strip().lower()
+        question = original_question.strip()
+        if question.lower().startswith("/code"):
+            normalized_mode = "code"
+            question = question[5:].strip()
+        if normalized_mode not in {"info", "code"}:
+            normalized_mode = "info"
 
         # Dynamic recursion depth adjustment based on network size
         # Count all reachable nodes + self
@@ -608,7 +668,8 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
         print(f"[Orchestrator] Network Size: {network_size} nodes. Adjusting recursion depth: {max_iterations} -> {dynamic_depth}")
         max_iterations = dynamic_depth
 
-        print(f"[Orchestrator] Starting ComoRAG Reasoning Cycle for: {original_question}")
+        print(f"[Orchestrator] Starting ComoRAG Reasoning Cycle for: {question}")
+        print(f"[Orchestrator] Mode: {normalized_mode}")
         
         historical_information = ""
         previous_probes: List[str] = []
@@ -622,28 +683,40 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             
             # 1. Try to Answer (Check for sufficiency)
             # We use _attempt_answer to check if we have enough info to form a conclusion.
-            if i > 0:
-                short_answer = self._attempt_answer(original_question, historical_information)
+            if normalized_mode == "code":
+                answer = self._attempt_answer(question, historical_information, mode="code")
+                step_answers.append({"step": i+1, "answer": answer, "history_len": len(historical_information)})
+                if answer != "*" and len(answer) > 10:
+                    return {
+                        "original_question": question,
+                        "final_answer": answer,
+                        "iterations": i + 1,
+                        "history": step_answers,
+                        "mode": normalized_mode,
+                    }
+            elif i > 0:
+                short_answer = self._attempt_answer(question, historical_information, mode="info")
                 step_answers.append({"step": i+1, "answer": short_answer, "history_len": len(historical_information)})
                 
                 if short_answer != "*" and short_answer != "Could not determine a final answer." and len(short_answer) > 10:
                      print(f"[Orchestrator] Sufficient information found. Synthesizing long answer...")
-                     final_answer = self._synthesize_long_answer(original_question, historical_information)
+                     final_answer = self._synthesize_long_answer(question, historical_information, mode="info")
                      return {
-                        "original_question": original_question,
+                        "original_question": question,
                         "final_answer": final_answer,
                         "iterations": i+1,
-                        "history": step_answers
+                        "history": step_answers,
+                        "mode": normalized_mode,
                      }
             else:
                 print(f"[Orchestrator] Iteration 1: Skipping early answer check to force swarm probe distribution.")
             
             # 2. Generate Probes (JSON-first)
             if i == 0:
-                new_probes = self._generate_comorag_probes(original_question, historical_information, previous_probes)
+                new_probes = self._generate_comorag_probes(question, historical_information, previous_probes)
             else:
                 new_probes = self._generate_probe_queries(
-                    original_question,
+                    question,
                     historical_information,
                     open_questions,
                     max_items=3,
@@ -657,7 +730,7 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             # 3. Dispatch & Collect
             collected_evidence = self._dispatch_probes(
                 new_probes,
-                original_question,
+                question,
                 historical_information,
                 previous_probes,
                 domain=domain,
@@ -665,7 +738,7 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
             
             # 4. Consolidate (JSON) + publish distributed memory
             consolidated = self._consolidate_evidence_state(
-                original_question=original_question,
+                original_question=question,
                 previous_context=historical_information,
                 evidence_list=collected_evidence,
                 previous_probes=previous_probes,
@@ -703,12 +776,13 @@ The answer should be well-structured, multi-paragraph, and cover all aspects of 
 
         # Final attempt if loop finishes
         print(f"[Orchestrator] Max iterations reached. Synthesizing final answer...")
-        final_answer = self._synthesize_long_answer(original_question, historical_information)
+        final_answer = self._synthesize_long_answer(question, historical_information, mode=normalized_mode)
         return {
-            "original_question": original_question,
+            "original_question": question,
             "final_answer": final_answer,
             "iterations": max_iterations,
-            "history": step_answers
+            "history": step_answers,
+            "mode": normalized_mode,
         }
 
     def decompose_and_distribute(self, question: str, max_cycles: int = 2, golden_answers: Optional[List[str]] = None) -> Dict[str, Any]:

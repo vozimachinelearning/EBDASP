@@ -151,6 +151,7 @@ class SwarmTUI(App):
         self.node_id = node_id
         self.network_enabled = network_enabled
         self.stop_event = stop_event
+        self._coding_mode = os.getenv("SWARM_MODE", "info").strip().lower() == "code"
         self._eval_map = self._load_eval_map(os.getenv("SWARM_EVAL_QAS_PATH"))
         self._eval_min_words = int(os.getenv("SWARM_EVAL_MIN_WORDS", "80"))
         self._eval_always = os.getenv("SWARM_EVAL_ALWAYS", "0").lower() in {"1", "true", "yes"}
@@ -514,12 +515,34 @@ class SwarmTUI(App):
         if text.lower() == "/status":
             self.refresh_status()
             return
+        if text.lower().startswith("/mode "):
+            requested = text.split(None, 1)[1].strip().lower()
+            if requested in {"code", "coding"}:
+                self._coding_mode = True
+                self._write_activity("Mode: code")
+                return
+            if requested in {"info", "text", "default"}:
+                self._coding_mode = False
+                self._write_activity("Mode: info")
+                return
+            self._write_activity("Mode: unknown (use /mode code or /mode info)")
+            return
+
+        override_mode = None
+        pipeline_input = text
+        if text.lower().startswith("/code "):
+            override_mode = "code"
+            pipeline_input = text[6:].strip()
+            if not pipeline_input:
+                self._write_activity("Usage: /code <request>")
+                return
 
         # Unified ComoRAG Pipeline
         # Treat every input as a task/query for the swarm
-        threading.Thread(target=self._run_swarm_pipeline, args=(text,), daemon=True).start()
+        selected_mode = override_mode or ("code" if self._coding_mode else "info")
+        threading.Thread(target=self._run_swarm_pipeline, args=(pipeline_input, selected_mode), daemon=True).start()
 
-    def _run_swarm_pipeline(self, user_input: str) -> None:
+    def _run_swarm_pipeline(self, user_input: str, mode: str = "info") -> None:
         """
         Executes the unified ComoRAG pipeline:
         1. Decompose the user input into sub-tasks (chunks).
@@ -533,7 +556,10 @@ class SwarmTUI(App):
         try:
             # Use the orchestrator to manage the full cycle
             # This handles decomposition, distribution, and consolidation
-            results = self.orchestrator.run_reasoning_cycle(user_input)
+            try:
+                results = self.orchestrator.run_reasoning_cycle(user_input, mode=mode)
+            except TypeError:
+                results = self.orchestrator.run_reasoning_cycle(user_input)
             
             final_answer = results.get('final_answer', 'No answer generated.')
             parts = results.get("parts", [])
