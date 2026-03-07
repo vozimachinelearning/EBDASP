@@ -1,3 +1,7 @@
 /.venv/
 /models/
 /storage/
+/tmp_prune/
+/hf/
+/logs/
+/models/

@@ -120,41 +120,15 @@ class Worker:
         worker_insight = None
         
         if self.llm_engine:
-            # ComoRAG Memory Fusion Logic
-            # We use the exact prompt from ComoRAG to fuse local evidence into structured Key Findings.
+            # Evidence fusion for probe handling.
             
             evidence_text = json.dumps([c['text'] for c in chunks], ensure_ascii=False) if chunks else "No local evidence found."
             
             pool_system_prompt = (
-                "###Role\n"
-                "You are an expert narrative analyst capable of identifying, extracting, and analyzing key information from narrative texts to provide accurate and targeted answers to specific questions.\n\n"
-                "###Material\n"
-                "You are given the following:\n"
-                "1. A specific question that needs to be answered\n"
-                "2. Content: Direct excerpts, facts, and specific information from the narrative text\n\n"
-                "###Task\n"
-                "1. Carefully analyze the question to identify:\n"
-                "- What type of information is being asked (character actions, locations, objects, events, motivations, etc.)\n"
-                "- Which narrative elements are relevant to answering it\n"
-                "- The specific details that need to be extracted\n\n"
-                "2. Systematically scan the content for:\n"
-                "- Direct mentions of relevant elements (names, places, objects, events)\n"
-                "- Contextual clues that help answer the question\n"
-                "- Temporal and spatial relationships\n"
-                "- Cause-and-effect connections\n\n"
-                "3. Analyze the identified information considering:\n"
-                "- Explicit statements (directly stated facts)\n"
-                "- Implicit information (suggested through context, dialogue, or narrative)\n"
-                "- Logical connections between different narrative elements\n"
-                "- Chronological sequence of events if relevant\n\n"
-                "4. Synthesize findings to construct a precise answer to the question.\n\n"
-                "###Response Format\n"
-                "Provide a structured analysis with up to 5 key findings:\n\n"
-                "- Key Finding: <Most directly relevant information answering the question>\n"
-                "- Key Finding: <Supporting evidence or context>\n"
-                "- Key Finding: <Additional relevant details>\n"
-                "- Key Finding: <Clarifying information if needed>\n"
-                "- Key Finding: <Resolution of any ambiguities>\n"
+                "You are synthesizing evidence to support a multi-node reasoning loop.\n"
+                "Given a question and retrieved content, write a concise evidence summary in a few sentences.\n"
+                "Focus only on details that directly help answer the question.\n"
+                "Do not output JSON or bullet-only lists.\n"
             )
             
             user_content = f"Questions:\n{probe_query.probe_text}\n\nContent:\n{evidence_text}\n\nYour Response: "
@@ -242,11 +216,12 @@ class Worker:
                 f"Subtask: {task.description}\n\n"
                 f"{retrieved_block}"
                 f"Memory Context:\n{memory_context}\n\n"
-                "Focus only on evidence that advances the Global Goal. Do not introduce unrelated tasks. "
-                "Return a JSON object with keys: topic, evidence, reasoning, confidence."
+                "Write a detailed section that advances the Global Goal. "
+                "Use multi-paragraph natural language. "
+                "Do not output JSON or outlines."
             )
             # Assuming generate is blocking for now
-            result_text = self._generate_with_model(collection_id, prompt)
+            result_text = self._generate_with_model(collection_id, prompt, max_new_tokens=1200, temperature=0.35)
             print(f"[Worker:{self.transport.node_id}] LLM Generation complete ({len(result_text)} chars).")
         else:
             print(f"[Worker:{self.transport.node_id}] Simulating execution.")

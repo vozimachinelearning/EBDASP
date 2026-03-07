@@ -65,9 +65,9 @@ class Orchestrator:
                 topic_probes = probes[:3]
             probe_text = "; ".join(topic_probes[:3])
             if probe_text:
-                description = f"Gather evidence on topic: {topic}. Use probes: {probe_text}. Provide concise evidence points."
+                description = f"Write a detailed section about: {topic}. Use probes: {probe_text}. Provide multi-paragraph content that directly supports the final answer."
             else:
-                description = f"Gather evidence on topic: {topic}. Provide concise evidence points."
+                description = f"Write a detailed section about: {topic}. Provide multi-paragraph content that directly supports the final answer."
             tasks.append(description)
         return tasks
 
@@ -544,15 +544,15 @@ Do not include explanations, outlines, or evidence.
 
         probes_tail = previous_probes[-10:] if previous_probes else []
         prompt = f"""
-You are consolidating distributed evidence for a multi-node reasoning loop.
+Consolidate the following evidence with the existing context to create a coherent understanding.
 Original Question: {original_question}
-Previous Consolidated Context: {previous_context}
+Existing Context: {previous_context}
 Previous Probes: {json.dumps(probes_tail, ensure_ascii=False)}
 New Evidence:
 {evidence_text}
 
 Return JSON only with keys:
-- consolidated_context: string (keep it tightly aligned to the original question)
+- consolidated_context: string (multi-paragraph, tightly aligned to the original question)
 - key_entities: list of strings (max {max_entities})
 - open_questions: list of strings (max {max_open_questions}) to guide next probes
 """
@@ -737,30 +737,14 @@ Do not include explanations, outlines, or evidence.
             return retry_candidate if self._has_code_block(retry_candidate) else retry_candidate
             
         prompt = f"""
-### Role
-You are an expert analyst and technical writer.
+Based on the comprehensive context provided, provide a detailed and well-reasoned response to the question.
+Make the response as complete and long as needed to fully answer the question.
 
-### Task
-Provide a comprehensive, detailed, and long-form answer to the question based on the provided context.
-The answer should be well-structured, multi-paragraph, and cover all aspects of the question using the evidence gathered.
+Question: {question}
 
-### Question
-{question}
-
-### Consolidated Context
-{context}
-
-### Instructions
-1. Write a cohesive narrative.
-2. Use specific details from the context.
-3. Do NOT include a "Summary" section.
-4. Do NOT repeat paragraphs or sentences.
-5. Stop when the answer is complete.
-6. Format as Markdown.
-7. Do NOT include instructions, outlines, or section placeholders.
-8. Do NOT include sections titled References, Acknowledgments, Further Reading, Additional Notes, or Style.
+Context: {context}
 """
-        response = self.llm_engine.generate(prompt, max_new_tokens=1400, temperature=0.4)
+        response = self.llm_engine.generate(prompt, max_new_tokens=2200, temperature=0.35)
         cleaned = self._strip_prompt_instructions(response)
         if self._is_outline_like(cleaned):
             rewrite_prompt = f"""
@@ -772,7 +756,7 @@ Write a comprehensive, well-structured answer in paragraphs.
 Do not include instructions, outlines, or section placeholders.
 Do not include sections titled Summary, References, Acknowledgments, Further Reading, Additional Notes, or Style.
 """
-            rewritten = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1400, temperature=0.35)
+            rewritten = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
             cleaned = self._strip_prompt_instructions(rewritten)
         return cleaned
 
@@ -1250,21 +1234,20 @@ Return a concise updated context that preserves the goal and removes unrelated c
                 [f"Part {p['index']} ({p['part_id']}): [{p['node_id']}] {p['result']}" for p in parts]
             )
             cycle_summary = "\n".join([f"Task: {r.task_id} | Result: {r.result}" for r in ordered_results])
-            evidence_prompt = f"""
-You are building an evidence map from distributed task results.
-Original Goal: {question}
+            context_prompt = f"""
+Consolidate the following distributed task results into a coherent context aligned to the original request.
+Original Request: {question}
 Topics: {json.dumps(topics, ensure_ascii=False)}
 Results:
 {cycle_summary}
-Return JSON with keys: evidence_map (list of {{topic, evidence, gaps}}).
-Return JSON only.
+Return a single cohesive context in paragraphs.
 """
-            evidence_map = self.llm_engine.generate(evidence_prompt, max_new_tokens=512, temperature=0.2)
+            context_summary = self.llm_engine.generate(context_prompt, max_new_tokens=900, temperature=0.3)
             if self.coordinator.store:
                 self.coordinator.store.add_memory(
-                    text=evidence_map,
+                    text=context_summary,
                     source=self.transport.node_id,
-                    tags=["evidence_map", f"context_id:{global_context_id}"],
+                    tags=["context_summary", f"context_id:{global_context_id}"],
                 )
             consolidation_prompt = f"""
 You are a project manager. Review the results of the current cycle.
@@ -1272,8 +1255,8 @@ Original Request: {question}
 Current Cycle Context: {current_context}
 Memory:
 {memory_context}
-Evidence Map:
-{evidence_map}
+Context Summary:
+{context_summary}
 Results:
 {cycle_summary}
 
@@ -1291,14 +1274,6 @@ Content: [Final Answer or Next Steps]
             print(f"[Orchestrator] Cycle {cycle + 1} Analysis: {status_line}")
             content_start = response.find("Content:")
             content = response[content_start + 8:].strip() if content_start != -1 else response
-            needs_more = False
-            if "gaps" in evidence_map:
-                if re.search(r'"gaps"\s*:\s*\[(?!\s*\])', evidence_map):
-                    needs_more = True
-            if "DONE" in status_line and needs_more:
-                status_line = "Status: CONTINUE"
-                content = f"Resolve remaining gaps: {evidence_map}"
-
             if "DONE" in status_line:
                 assembly_prompt = f"""
 You are assembling a response from distributed parts.
@@ -1306,8 +1281,8 @@ Question: {question}
 Current Context: {current_context}
 Memory:
 {memory_context}
-Evidence Map:
-{evidence_map}
+Context Summary:
+{context_summary}
 Parts:
 {parts_text}
 
@@ -1318,16 +1293,16 @@ Compose a coherent final response from the parts. Preserve correct order and rem
 You are producing the final long answer for the user.
 Original Question: {question}
 Enhanced Query: {enhanced_query}
-Evidence Map:
-{evidence_map}
+Context Summary:
+{context_summary}
 Draft:
 {draft_answer}
 
-Write a comprehensive, well-structured answer in natural language. Avoid JSON or lists-only output. Use paragraphs. Ensure completeness.
+Write a comprehensive, well-structured answer in natural language. Use paragraphs. Make the response as complete and long as needed to answer the question fully.
 """
-                final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=900, temperature=0.3)
-                if self._looks_like_json(final_answer) or len(final_answer.split()) < 120:
-                    final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=1100, temperature=0.4)
+                final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=2000, temperature=0.3)
+                if self._looks_like_json(final_answer) or len(final_answer.split()) < 180:
+                    final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=2400, temperature=0.35)
                 if self._looks_like_json(final_answer):
                     rewrite_prompt = f"""
 Rewrite the content below into a fluent, long-form answer in natural language.
@@ -1335,14 +1310,14 @@ Do not output JSON, code blocks, or bullet-only lists.
 Content:
 {final_answer}
 """
-                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1100, temperature=0.35)
+                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
                 final_answer = self._strip_prompt_instructions(final_answer)
                 if self._is_outline_like(final_answer):
                     rewrite_prompt = f"""
-You are writing the final answer to the user's question using the evidence map and draft.
+You are writing the final answer to the user's question using the context summary and draft.
 Question: {question}
-Evidence Map:
-{evidence_map}
+Context Summary:
+{context_summary}
 Draft:
 {draft_answer}
 
@@ -1350,7 +1325,7 @@ Write a comprehensive, well-structured answer in paragraphs.
 Do not include instructions, outlines, or section placeholders.
 Do not include sections titled Summary, References, Acknowledgments, Further Reading, Additional Notes, or Style.
 """
-                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=1100, temperature=0.35)
+                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
                     final_answer = self._strip_prompt_instructions(final_answer)
                 print(f"Task completed. Final Answer: {final_answer[:200]}...")
                 self.transport.emit_activity(
