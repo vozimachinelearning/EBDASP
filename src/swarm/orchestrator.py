@@ -5,6 +5,7 @@ import uuid
 import time
 import threading
 import os
+import hashlib
 
 from .coordinator import Coordinator
 from .messages import EvidenceChunk, GlobalMemoryUpdate, ProbeQuery, QueryRequest, QueryResponse, RouteRequest, Task, TaskAssignment, TaskResult
@@ -45,6 +46,26 @@ class Orchestrator:
         if len(cleaned) <= limit:
             return cleaned
         return cleaned[:limit].rstrip() + "..."
+
+    def _hash_text(self, text: str) -> str:
+        return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+    def _split_response_parts(self, prompt_builder, max_parts: int = 6, max_new_tokens: int = 700, temperature: float = 0.3) -> List[str]:
+        parts: List[str] = []
+        for index in range(max_parts):
+            prompt = prompt_builder(index + 1, parts)
+            response = self.llm_engine.generate(prompt, max_new_tokens=max_new_tokens, temperature=temperature)
+            cleaned = self._strip_prompt_instructions(response)
+            if "NO MORE CONTENT" in cleaned.upper():
+                break
+            cleaned = cleaned.strip()
+            if not cleaned:
+                break
+            prefix = f"part {index + 1}:"
+            if cleaned.lower().startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+            parts.append(cleaned)
+        return parts
 
     def _dedupe_items(self, items: List[str]) -> List[str]:
         seen = set()
@@ -736,6 +757,23 @@ Do not include explanations, outlines, or evidence.
             retry_candidate = self._strip_prompt_instructions(retry)
             return retry_candidate if self._has_code_block(retry_candidate) else retry_candidate
             
+        def build_prompt(part_index: int, prior_parts: List[str]) -> str:
+            prior_text = "\n\n".join(prior_parts) if prior_parts else "[None]"
+            return f"""
+You are writing the final answer in multiple parts to bypass output limits.
+Question: {question}
+Context: {context}
+Already Generated:
+{prior_text}
+
+Write the next part. Begin with "Part {part_index}:".
+If there is no new content to add, write "NO MORE CONTENT" only.
+"""
+
+        parts = self._split_response_parts(build_prompt, max_parts=6, max_new_tokens=900, temperature=0.35)
+        if parts:
+            return "\n\n".join(parts).strip()
+
         prompt = f"""
 Based on the comprehensive context provided, provide a detailed and well-reasoned response to the question.
 Make the response as complete and long as needed to fully answer the question.
@@ -759,6 +797,28 @@ Do not include sections titled Summary, References, Acknowledgments, Further Rea
             rewritten = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
             cleaned = self._strip_prompt_instructions(rewritten)
         return cleaned
+
+    def _synthesize_response_parts(self, question: str, enhanced_query: str, context_summary: str, draft_answer: str, memory_context: str) -> List[str]:
+        def build_prompt(part_index: int, prior_parts: List[str]) -> str:
+            prior_text = "\n\n".join(prior_parts) if prior_parts else "[None]"
+            return f"""
+You are producing the final response in multiple parts to bypass output limits.
+Original Question: {question}
+Enhanced Query: {enhanced_query}
+Context Summary:
+{context_summary}
+Draft:
+{draft_answer}
+Memory:
+{memory_context}
+Already Generated:
+{prior_text}
+
+Write the next part. Begin with "Part {part_index}:".
+If there is no new content to add, write "NO MORE CONTENT" only.
+"""
+
+        return self._split_response_parts(build_prompt, max_parts=6, max_new_tokens=700, temperature=0.3)
 
     def run_reasoning_cycle(
         self,
@@ -946,6 +1006,8 @@ Do not include sections titled Summary, References, Acknowledgments, Further Rea
         )
         all_results = []
         final_answer = ""
+        response_parts: List[str] = []
+        memory_pool_hashes: List[str] = []
         
         for cycle in range(max_cycles):
             print(f"--- Cycle {cycle + 1}/{max_cycles} ---")
@@ -1233,6 +1295,19 @@ Return a concise updated context that preserves the goal and removes unrelated c
             parts_text = "\n".join(
                 [f"Part {p['index']} ({p['part_id']}): [{p['node_id']}] {p['result']}" for p in parts]
             )
+            memory_pool_hashes = []
+            for result in ordered_results:
+                text = str(result.result or "").strip()
+                if not text:
+                    continue
+                content_hash = self._hash_text(text)
+                memory_pool_hashes.append(content_hash)
+                if self.coordinator.store:
+                    self.coordinator.store.add_memory(
+                        text=text,
+                        source=result.node_id,
+                        tags=["memory_pool", "task_result", f"context_id:{global_context_id}", f"task_id:{result.task_id}", f"content_hash:{content_hash}"],
+                    )
             cycle_summary = "\n".join([f"Task: {r.task_id} | Result: {r.result}" for r in ordered_results])
             context_prompt = f"""
 Consolidate the following distributed task results into a coherent context aligned to the original request.
@@ -1289,7 +1364,17 @@ Parts:
 Compose a coherent final response from the parts. Preserve correct order and remove duplication.
 """
                 draft_answer = self.llm_engine.generate(assembly_prompt)
-                synthesis_prompt = f"""
+                response_parts = self._synthesize_response_parts(
+                    question=question,
+                    enhanced_query=enhanced_query,
+                    context_summary=context_summary,
+                    draft_answer=draft_answer,
+                    memory_context=memory_context,
+                )
+                if response_parts:
+                    final_answer = "\n\n".join(response_parts).strip()
+                else:
+                    synthesis_prompt = f"""
 You are producing the final long answer for the user.
 Original Question: {question}
 Enhanced Query: {enhanced_query}
@@ -1300,20 +1385,20 @@ Draft:
 
 Write a comprehensive, well-structured answer in natural language. Use paragraphs. Make the response as complete and long as needed to answer the question fully.
 """
-                final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=2000, temperature=0.3)
-                if self._looks_like_json(final_answer) or len(final_answer.split()) < 180:
-                    final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=2400, temperature=0.35)
-                if self._looks_like_json(final_answer):
-                    rewrite_prompt = f"""
+                    final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=2000, temperature=0.3)
+                    if self._looks_like_json(final_answer) or len(final_answer.split()) < 180:
+                        final_answer = self.llm_engine.generate(synthesis_prompt, max_new_tokens=2400, temperature=0.35)
+                    if self._looks_like_json(final_answer):
+                        rewrite_prompt = f"""
 Rewrite the content below into a fluent, long-form answer in natural language.
 Do not output JSON, code blocks, or bullet-only lists.
 Content:
 {final_answer}
 """
-                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
-                final_answer = self._strip_prompt_instructions(final_answer)
-                if self._is_outline_like(final_answer):
-                    rewrite_prompt = f"""
+                        final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
+                    final_answer = self._strip_prompt_instructions(final_answer)
+                    if self._is_outline_like(final_answer):
+                        rewrite_prompt = f"""
 You are writing the final answer to the user's question using the context summary and draft.
 Question: {question}
 Context Summary:
@@ -1325,13 +1410,23 @@ Write a comprehensive, well-structured answer in paragraphs.
 Do not include instructions, outlines, or section placeholders.
 Do not include sections titled Summary, References, Acknowledgments, Further Reading, Additional Notes, or Style.
 """
-                    final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
-                    final_answer = self._strip_prompt_instructions(final_answer)
+                        final_answer = self.llm_engine.generate(rewrite_prompt, max_new_tokens=2200, temperature=0.35)
+                        final_answer = self._strip_prompt_instructions(final_answer)
                 print(f"Task completed. Final Answer: {final_answer[:200]}...")
+                final_answer = final_answer.strip()
+                if final_answer:
+                    final_hash = self._hash_text(final_answer)
+                    memory_pool_hashes.append(final_hash)
+                    if self.coordinator.store:
+                        self.coordinator.store.add_memory(
+                            text=final_answer,
+                            source=self.transport.node_id,
+                            tags=["memory_pool", "final_answer", f"context_id:{global_context_id}", f"content_hash:{final_hash}"],
+                        )
                 self.transport.emit_activity(
                     "pipeline_final",
                     node_id=self.transport.node_id,
-                    payload={"final_answer": final_answer},
+                    payload={"final_answer": final_answer, "response_parts": response_parts, "memory_pool_hashes": memory_pool_hashes},
                 )
                 evaluation = None
                 if golden_answers:
@@ -1388,6 +1483,8 @@ Do not include sections titled Summary, References, Acknowledgments, Further Rea
             "results": [r.to_dict() for r in all_results],
             "parts": [item for item in parts] if 'parts' in locals() else [],
             "final_answer": final_answer,
+            "response_parts": response_parts,
+            "memory_pool_hashes": memory_pool_hashes,
             "evaluation": evaluation if "evaluation" in locals() else None,
         }
 

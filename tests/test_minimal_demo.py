@@ -28,13 +28,13 @@ class DummyOrchestrator:
     def __init__(self):
         self.calls = []
 
-    def run_reasoning_cycle(self, question):
+    def decompose_and_distribute(self, question):
         self.calls.append(question)
         return {"final_answer": "respuesta", "parts": [], "results": []}
 
 
 class TestMinimalDemo(unittest.TestCase):
-    def test_run_swarm_pipeline_calls_reasoning_cycle(self):
+    def test_run_swarm_pipeline_calls_decompose_and_distribute(self):
         if importlib.util.find_spec("textual") is None:
             self.skipTest("textual no instalado")
         module = load_minimal_demo()

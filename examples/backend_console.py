@@ -350,9 +350,20 @@ class SwarmTUI(App):
                 self._write_activity(f"[{node_id}] {formatted}")
             return
         if event_name == "pipeline_final":
-            formatted = self._format_response_text(payload.get("final_answer", ""))
-            if formatted:
-                self._write_activity(f"[Final] {formatted}")
+            parts = payload.get("response_parts") or []
+            if parts:
+                total = len(parts)
+                for idx, part in enumerate(parts, 1):
+                    formatted = self._format_response_text(part)
+                    if formatted:
+                        self._write_activity(f"[Final {idx}/{total}] {formatted}")
+            else:
+                formatted = self._format_response_text(payload.get("final_answer", ""))
+                if formatted:
+                    self._write_activity(f"[Final] {formatted}")
+            hashes = payload.get("memory_pool_hashes") or []
+            if hashes:
+                self._write_activity_block("Memory Pool Hashes", [str(item) for item in hashes])
             return
 
     def _format_response_text(self, value) -> str:
@@ -557,15 +568,25 @@ class SwarmTUI(App):
             # Use the orchestrator to manage the full cycle
             # This handles decomposition, distribution, and consolidation
             try:
-                results = self.orchestrator.run_reasoning_cycle(user_input, mode=mode)
+                results = self.orchestrator.decompose_and_distribute(user_input)
             except TypeError:
-                results = self.orchestrator.run_reasoning_cycle(user_input)
-            
-            final_answer = results.get('final_answer', 'No answer generated.')
-            
-            formatted_final = self._format_response_text(final_answer)
-            if formatted_final:
-                self._write_activity(formatted_final)
+                results = self.orchestrator.decompose_and_distribute(user_input)
+
+            response_parts = results.get("response_parts") or []
+            final_answer = results.get("final_answer", "No answer generated.")
+            if response_parts:
+                total = len(response_parts)
+                for idx, part in enumerate(response_parts, 1):
+                    formatted = self._format_response_text(part)
+                    if formatted:
+                        self._write_activity(f"[Final {idx}/{total}] {formatted}")
+            else:
+                formatted_final = self._format_response_text(final_answer)
+                if formatted_final:
+                    self._write_activity(formatted_final)
+            hashes = results.get("memory_pool_hashes") or []
+            if hashes:
+                self._write_activity_block("Memory Pool Hashes", [str(item) for item in hashes])
             print(f"Pipeline completed. Final Answer: {final_answer[:100]}...")
             
         except Exception as e:

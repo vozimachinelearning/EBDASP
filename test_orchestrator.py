@@ -27,6 +27,10 @@ class MockLLMEngine:
         return [{"task": t, "role": "Worker"} for t in sub_tasks]
 
     def generate(self, prompt: str, **kwargs) -> str:
+        if "final response in multiple parts" in prompt or "Write the next part." in prompt:
+            if "Already Generated:\n[None]" not in prompt:
+                return "NO MORE CONTENT"
+            return "Part 1: Mock Final Answer"
         if "Status:" in prompt:
             return "Status: DONE\nContent: Mock Final Answer"
         if "assembling a response" in prompt:
